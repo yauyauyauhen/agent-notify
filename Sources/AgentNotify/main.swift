@@ -74,13 +74,20 @@ func removeGroup(_ group: String) -> Int {
 }
 
 func post(group: String, title: String, message: String) {
-    _ = removeGroup(group)
+    // Strays: same group but a different identifier (posted by an external
+    // fallback tool). Remove those explicitly.
+    for old in center.deliveredNotifications
+    where old.userInfo?["groupID"] as? String == group && old.identifier != group {
+        center.removeDeliveredNotification(old)
+    }
     let n = NSUserNotification()
     n.title = title
     n.informativeText = message
-    let uuid = UUID().uuidString
-    n.identifier = uuid
-    n.userInfo = ["groupID": group, "uuid": uuid]
+    // Fixed identifier per group: macOS replaces the previous banner IN
+    // PLACE, atomically. remove-then-deliver leaves a window where the
+    // removal updates the store but the rendered banner survives as a ghost.
+    n.identifier = group
+    n.userInfo = ["groupID": group, "uuid": group]
     center.deliver(n)
 }
 
