@@ -1,47 +1,23 @@
 # agent-notify
 
-**One daemon to own all your CLI notifications on macOS — because one process per banner is a race condition.**
+**Turn macOS notifications into a self-cleaning attention queue for your parallel AI-agent sessions.**
 
-If you run multiple parallel AI coding sessions (Claude Code, Codex, Cursor agents) with completion notifications — for example via [CCNotify](https://github.com/dazuiba/CCNotify) — you may have seen notifications misbehave in ways that look haunted:
+If you run several Claude Code (or Codex, or Cursor-agent) sessions side by side, the hard part isn't running them — it's knowing *which one needs you*. agent-notify makes your notification stack that answer:
 
-- you click **one** notification and **several** disappear;
-- a new notification from one session silently kills another session's banner;
-- a notification is "sent" but never appears;
-- the same setup works fine for days, then wipes your whole stack twice in an hour.
+- **One banner per session, stacked on screen** — each finished (or input-waiting) chat holds exactly one notification. The stack *is* your "sessions awaiting me" list.
+- **Always current** — when a session finishes another task, its new banner replaces its old one in place. No duplicates, no pile of stale history.
+- **Self-cleaning** — the moment you follow up in a chat, its notification disappears on its own. What remains on screen is only what you haven't attended to.
+- **Click to jump** — clicking a banner dismisses exactly that one and focuses your terminal app.
+- **Reliable by architecture** — existing CLI notifiers (alerter, terminal-notifier) spawn one process per banner, and those processes randomly wipe each other's notifications when several run at once (see [the bug](#the-bug-this-fixes) below). agent-notify is a single daemon that owns every banner through one connection, so that entire failure class can't happen.
 
-None of that is random. This repo contains the diagnosis and the fix.
-
-## The bug
-
-CLI notifiers like [alerter](https://github.com/vjeantet/alerter) and [terminal-notifier](https://github.com/julienXX/terminal-notifier) impersonate a real app's bundle identifier (your terminal's, usually) so their notifications get that app's icon and notification permission. `alerter` additionally keeps **one process alive per banner** so it can report clicks.
-
-Run several of those at once and every process claims the *same* app identity. Inside macOS's notification daemon (`usernoted`) they now share everything that is keyed by app:
-
-- **one delivered-notifications list** — every process sees (and can remove from) the shared list;
-- **one delegate slot** for click callbacks — each new process steals it, so click events are routed to whichever process registered last, not necessarily the one that posted the clicked banner;
-- **per-connection bookkeeping** — when a process exits *while its banner is still registered*, `usernoted`'s connection cleanup sometimes sweeps **sibling banners of the same identity** along with it.
-
-That last one is the killer, and it's a race — which is why it strikes "often" rather than "always", and why every flag-level fix (timeouts, groups, different removal calls) appears to work until it doesn't. Killing a notification process while its banner is up is the most reliable trigger; a user *clicking* a banner sits in the same window, because macOS removes the banner and the process exits within the same instant.
-
-We reproduced all of this live: single-pid `kill` of one alerter took down a sibling's banner posted by a *different* process, with the kill pattern provably matching only one of them. The alerter source is innocent — its removal paths are all correctly scoped. The sharing itself is the bug, and no flag can fix an architecture.
-
-## The fix
-
-Stop sharing. **agent-notify** is a single long-lived daemon that owns *all* banners through *one* notification-center connection:
-
-- it never exits per-notification, so the connection-cleanup race cannot occur — not "is unlikely to", *cannot, by construction*;
-- clicks route to the one process that owns everything, which dismisses exactly the clicked banner (matched by identifier) and focuses the impersonated app;
-- replacement and removal are plain list operations on the owner's connection;
-- and as the owner, it can **truthfully enumerate what's on screen** — something no outside process can do for an impersonated identity (`--list` in the CLI tools is blind for spoofed senders; with a supervisor you finally get ground truth).
-
-The delivery internals (bundle-identifier hook, alert-style plumbing) are adapted from [alerter](https://github.com/vjeantet/alerter) (MIT) — credit where due; the supervisor architecture and the protocol are new.
+Notifications appear under your terminal app's identity (its icon, its permission) — Cursor, iTerm2, Terminal, whatever you use.
 
 ## Install
 
 Requires Xcode (or Command Line Tools with Swift 6+).
 
 ```bash
-git clone https://github.com/YOU/agent-notify && cd agent-notify
+git clone https://github.com/yauyauyauhen/agent-notify && cd agent-notify
 swift build -c release
 cp .build/release/agent-notify /usr/local/bin/
 ```
@@ -60,7 +36,29 @@ cp examples/dev.agent-notify.plist ~/Library/LaunchAgents/
 launchctl bootstrap gui/$UID ~/Library/LaunchAgents/dev.agent-notify.plist
 ```
 
-The impersonated app must already have notification permission (style "Alerts" if you want banners to persist).
+The impersonated app must already have notification permission, with style "Alerts" so banners persist until handled.
+
+## Claude Code integration
+
+Wire it into [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) (or any agent runner with lifecycle hooks) using the session ID as the group — the per-session semantics above fall out automatically:
+
+```python
+# Stop hook: the turn finished — post/refresh this session's banner
+call({"cmd": "post", "group": session_id, "title": chat_title, "message": prompt_excerpt})
+
+# UserPromptSubmit hook: you're back in this chat — clear its banner
+call({"cmd": "remove", "group": session_id})
+```
+
+`call()` is a ~10-line unix-socket helper; a ready-made client ships in [`client/agent-notify-client.py`](client/agent-notify-client.py):
+
+```bash
+./client/agent-notify-client.py post my-session "build done" "47 tests passed"
+./client/agent-notify-client.py list
+./client/agent-notify-client.py remove my-session
+```
+
+This pairs naturally with [CCNotify](https://github.com/dazuiba/CCNotify), the Claude Code notification hook this project was born debugging.
 
 ## Protocol
 
@@ -68,7 +66,7 @@ Newline-delimited JSON over the unix socket. One request, one reply, per connect
 
 ```jsonc
 {"cmd":"post","group":"my-session","title":"build done","message":"47 tests passed"}
-// -> {"ok":true}    (a new post replaces any previous banner with the same group)
+// -> {"ok":true}    (replaces any previous banner with the same group)
 
 {"cmd":"remove","group":"my-session"}
 // -> {"ok":true,"removed":1}
@@ -77,25 +75,13 @@ Newline-delimited JSON over the unix socket. One request, one reply, per connect
 // -> {"ok":true,"notifications":[{"group":"...","title":"...","message":"...","deliveredAt":"..."}]}
 ```
 
-A minimal Python client ships in [`client/agent-notify-client.py`](client/agent-notify-client.py):
+`list` is ground truth: as the owner of the notification connection, the daemon can truthfully enumerate what's on screen — something no outside process can do for an impersonated identity.
 
-```bash
-./client/agent-notify-client.py post my-session "build done" "47 tests passed"
-./client/agent-notify-client.py list
-./client/agent-notify-client.py remove my-session
-```
+## The bug this fixes
 
-### Claude Code integration
+Classic CLI notifiers impersonate your terminal's bundle ID and keep one process alive per banner. Run several in parallel and every process claims the *same* app identity inside macOS's notification daemon — sharing one delivered-notifications list, one delegate slot for click routing, and per-connection bookkeeping. When any process exits while its banner is still registered, the cleanup sometimes sweeps *sibling* banners along with it.
 
-Use the session ID as the group and you get per-chat semantics for free: each chat's new notification replaces its previous one, chats never touch each other, and a `remove` on `UserPromptSubmit` gives you "typing in a chat dismisses that chat's notification":
-
-```python
-# inside your Stop hook
-call({"cmd": "post", "group": session_id, "title": chat_title, "message": prompt_excerpt})
-
-# inside your UserPromptSubmit hook
-call({"cmd": "remove", "group": session_id})
-```
+In practice that looks haunted: clicking one notification dismisses several; a new notification from one session silently kills another session's banner; the same setup works for days, then wipes your stack twice in an hour. It's a race, so it strikes "often", not "always" — and no flag can fix it, because the sharing itself is the bug (the notifier tools' own removal code is correctly scoped; we read it). A single supervisor owning all banners through one connection eliminates the race by construction. Full write-up in [vjeantet/alerter#75](https://github.com/vjeantet/alerter/issues/75).
 
 ## Caveats, honestly
 
