@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- LaunchAgent for agent-notify. Install to ~/Library/LaunchAgents/ and run:
+	     launchctl bootstrap gui/$UID ~/Library/LaunchAgents/dev.agent-notify.plist
+	     Replace the binary path, sender bundle id, and socket path with yours.
+	     The sender is the app your notifications appear as (its icon, its
+	     notification permission) — e.g. Cursor, iTerm2, Terminal. -->
+	<key>Label</key>
+	<string>dev.agent-notify</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/agent-notify</string>
+		<string>com.todesktop.230313mzl4w4u92</string>
+		<string>/Users/YOU/.agent-notify.sock</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Background</string>
+</dict>
+</plist>
