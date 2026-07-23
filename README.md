@@ -40,14 +40,25 @@ The impersonated app must already have notification permission, with style "Aler
 
 ## Claude Code integration
 
-Wire it into [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) (or any agent runner with lifecycle hooks) using the session ID as the group — the per-session semantics above fall out automatically:
+Wire it into [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) (or any agent runner with lifecycle hooks). One subtlety: use a **stable chat identity** as the group, not the raw `session_id` — resuming a chat (`--resume`) mints a *new* session ID for the same conversation, so session-keyed banners orphan on every resume (the old banner can never be replaced or dismissed again, and duplicates accumulate). The uuid of the transcript's first user record survives resumes, because resumed transcripts copy history verbatim:
 
 ```python
-# Stop hook: the turn finished — post/refresh this session's banner
-call({"cmd": "post", "group": session_id, "title": chat_title, "message": prompt_excerpt})
+def chat_group(transcript_path, session_id):
+    """Stable across --resume: the uuid of the chat's first user record."""
+    line = subprocess.run(["grep", "-m", "1", '"type":"user"', transcript_path],
+                          capture_output=True, text=True).stdout
+    try:
+        return json.loads(line)["uuid"]
+    except Exception:
+        return session_id
+
+group = chat_group(transcript_path, session_id)
+
+# Stop hook: the turn finished — post/refresh this chat's banner
+call({"cmd": "post", "group": group, "title": chat_title, "message": prompt_excerpt})
 
 # UserPromptSubmit hook: you're back in this chat — clear its banner
-call({"cmd": "remove", "group": session_id})
+call({"cmd": "remove", "group": group})
 ```
 
 `call()` is a ~10-line unix-socket helper; a ready-made client ships in [`client/agent-notify-client.py`](client/agent-notify-client.py):
