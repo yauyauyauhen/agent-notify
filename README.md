@@ -1,16 +1,24 @@
 # agent-notify
 
-**Turn macOS notifications into a self-cleaning attention queue for your parallel AI-agent sessions.**
+**Turn macOS notifications into a self-cleaning attention queue for the AI-agent sessions in your terminal.**
 
-If you run several Claude Code (or Codex, or Cursor-agent) sessions side by side, the hard part isn't running them — it's knowing *which one needs you*. agent-notify makes your notification stack that answer:
+## The problem it solves
 
-- **One banner per session, stacked on screen** — each finished (or input-waiting) chat holds exactly one notification. The stack *is* your "sessions awaiting me" list.
-- **Always current** — when a session finishes another task, its new banner replaces its old one in place. No duplicates, no pile of stale history.
-- **Self-cleaning** — the moment you follow up in a chat, its notification disappears on its own. What remains on screen is only what you haven't attended to.
-- **Click to jump** — clicking a banner dismisses exactly that one and focuses your terminal app.
+You run several Claude Code (or Codex, or Cursor-agent) sessions side by side, and each takes a while to finish. A ding tells you *something* replied — but not *which session*. The banners themselves pile up, go stale, or vanish when they shouldn't, and figuring out which agent actually needs you becomes its own job.
+
+## The solution
+
+agent-notify makes the notification stack itself the answer — a live list of exactly the sessions awaiting you:
+
+- **One notification banner on screen per agent session** — each finished (or input-waiting) session holds exactly one banner. The stack *is* your "sessions awaiting me" list.
+- **Self-cleaning** — a session's next notification replaces its previous one in place, and the moment you follow up in a chat, its banner disappears on its own. No duplicates, no stale pile: what's on screen is only what still needs you.
+- **Easy to scan** — banners are titled `chat name / worktree / repo`, with the worktree shown only when it isn't the main checkout. Name your chats (`/rename` in Claude Code) and the stack reads like a status board.
+- **Click to jump and dismiss** — clicking a banner dismisses exactly that one and focuses your terminal; every other agent's notification stays put until you click it or follow up with that agent.
 - **Reliable by architecture** — existing CLI notifiers (alerter, terminal-notifier) spawn one process per banner, and those processes randomly wipe each other's notifications when several run at once (see [the bug](#the-bug-this-fixes) below). agent-notify is a single daemon that owns every banner through one connection, so that entire failure class can't happen.
 
 Notifications appear under your terminal app's identity (its icon, its permission) — Cursor, iTerm2, Terminal, whatever you use.
+
+**Tip:** to see every session's banner at a glance instead of a collapsed pile, set notification grouping to **Off** for your terminal app in macOS notification settings.
 
 ## Install
 
@@ -54,7 +62,8 @@ def chat_group(transcript_path, session_id):
 
 group = chat_group(transcript_path, session_id)
 
-# Stop hook: the turn finished — post/refresh this chat's banner
+# Stop hook: the turn finished — post/refresh this chat's banner.
+# Recommended title: "<chat name> / <worktree if not main> / <repo>" — easy to scan in a stack
 call({"cmd": "post", "group": group, "title": chat_title, "message": prompt_excerpt})
 
 # UserPromptSubmit hook: you're back in this chat — clear its banner
@@ -94,7 +103,7 @@ Classic CLI notifiers impersonate your terminal's bundle ID and keep one process
 
 In practice that looks haunted: clicking one notification dismisses several; a new notification from one session silently kills another session's banner; the same setup works for days, then wipes your stack twice in an hour. It's a race, so it strikes "often", not "always" — and no flag can fix it, because the sharing itself is the bug (the notifier tools' own removal code is correctly scoped; we read it). A single supervisor owning all banners through one connection eliminates the race by construction. Full write-up in [vjeantet/alerter#75](https://github.com/vjeantet/alerter/issues/75).
 
-## Caveats, honestly
+## Caveats
 
 - Built on `NSUserNotification`, which Apple deprecated years ago and keeps shipping anyway (every CLI notifier relies on it — the modern `UserNotifications` framework requires a signed app bundle). A future macOS may break this entire tool category at once.
 - Bundle-identifier impersonation is a runtime swizzle of `NSBundle` — a well-worn community trick, not API.
