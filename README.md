@@ -22,7 +22,13 @@ Notifications appear under your terminal app's identity (its icon, its permissio
 
 ## Install
 
-Requires Xcode (or Command Line Tools with Swift 6+).
+**Fastest — let your agent do it.** Paste this into Claude Code:
+
+> Install agent-notify by following https://github.com/yauyauyauhen/agent-notify/blob/main/install.md
+
+Your agent builds the daemon, detects your terminal app, sets up the LaunchAgent, and wires the ready-made Claude Code hook — [install.md](install.md) tells it exactly what to touch, how to verify every step, and how to uninstall. Out of the box this covers Claude Code; any other agent runner works via the three-command [protocol](#protocol).
+
+**Manual** — requires the Command Line Tools (Swift 6+ ships with them):
 
 ```bash
 git clone https://github.com/yauyauyauhen/agent-notify && cd agent-notify
@@ -48,27 +54,13 @@ The impersonated app must already have notification permission, with style "Aler
 
 ## Claude Code integration
 
-Wire it into [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) (or any agent runner with lifecycle hooks). One subtlety: use a **stable chat identity** as the group, not the raw `session_id` — resuming a chat (`--resume`) mints a *new* session ID for the same conversation, so session-keyed banners orphan on every resume (the old banner can never be replaced or dismissed again, and duplicates accumulate). The uuid of the transcript's first user record survives resumes, because resumed transcripts copy history verbatim:
+The ready-made hook ships in [`hooks/claude-code-hook.py`](hooks/claude-code-hook.py) — the agent install wires it up for you. It implements everything the attention-queue behavior needs:
 
-```python
-def chat_group(transcript_path, session_id):
-    """Stable across --resume: the uuid of the chat's first user record."""
-    line = subprocess.run(["grep", "-m", "1", '"type":"user"', transcript_path],
-                          capture_output=True, text=True).stdout
-    try:
-        return json.loads(line)["uuid"]
-    except Exception:
-        return session_id
+- posts on `Stop` — title `chat name / worktree / repo`, body = your prompt, flattened and truncated to read as ~2 banner lines;
+- dismisses that chat's banner on `UserPromptSubmit`; shows `Notification` events' real text and suppresses idle "waiting for input" reminders;
+- keys banners by a **stable chat identity** (the uuid of the transcript's first user record), not the raw `session_id` — resuming a chat (`--resume`) mints a new session ID, and session-keyed banners would orphan on every resume. It also ignores a `/rename` title inherited through `/clear`.
 
-group = chat_group(transcript_path, session_id)
-
-# Stop hook: the turn finished — post/refresh this chat's banner.
-# Recommended title: "<chat name> / <worktree if not main> / <repo>" — easy to scan in a stack
-call({"cmd": "post", "group": group, "title": chat_title, "message": prompt_excerpt})
-
-# UserPromptSubmit hook: you're back in this chat — clear its banner
-call({"cmd": "remove", "group": group})
-```
+Integrating a different agent runner? The hook is ~150 lines of dependency-free Python over the three-command protocol below — adapt away.
 
 `call()` is a ~10-line unix-socket helper; a ready-made client ships in [`client/agent-notify-client.py`](client/agent-notify-client.py):
 

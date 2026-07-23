@@ -126,6 +126,13 @@ func handle(_ request: [String: Any]) -> [String: Any] {
 
 // MARK: - Unix socket server
 
+// Refuse to unlink anything that isn't a socket — protects against a
+// mistyped path in the LaunchAgent deleting a real file.
+var existing = stat()
+if stat(socketPath, &existing) == 0 && (existing.st_mode & S_IFMT) != S_IFSOCK {
+    FileHandle.standardError.write("refusing to replace non-socket at \(socketPath)\n".data(using: .utf8)!)
+    exit(1)
+}
 unlink(socketPath)
 let serverFD = socket(AF_UNIX, SOCK_STREAM, 0)
 guard serverFD >= 0 else { perror("socket"); exit(1) }
@@ -141,6 +148,7 @@ let bindResult = withUnsafePointer(to: &addr) {
     }
 }
 guard bindResult == 0 else { perror("bind"); exit(1) }
+chmod(socketPath, 0o600)  // owner-only, independent of the user's umask
 guard listen(serverFD, 16) == 0 else { perror("listen"); exit(1) }
 
 DispatchQueue.global().async {
@@ -155,6 +163,7 @@ DispatchQueue.global().async {
                 let n = read(clientFD, &buf, buf.count)
                 guard n > 0 else { break }
                 data.append(contentsOf: buf[0..<n])
+                if data.count > 1_048_576 { return }  // cap: drop absurd requests
             }
             guard let lineEnd = data.firstIndex(of: 0x0A) else { return }
             let reply: [String: Any]
