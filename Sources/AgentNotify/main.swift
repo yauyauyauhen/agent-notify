@@ -70,6 +70,14 @@ func removeGroup(_ group: String) -> Int {
         center.removeDeliveredNotification(n)
         removed += 1
     }
+    // Second, independent shot by CONSTRUCTED identifier: the notification
+    // bridge occasionally drops an enumeration-based removal (the banner
+    // survives on screen), and records delivered by a previous daemon
+    // instance are invisible to this connection's enumeration entirely.
+    // Identifier addressing reaches both — verified live on a stuck banner.
+    let probe = NSUserNotification()
+    probe.identifier = group
+    center.removeDeliveredNotification(probe)
     return removed
 }
 
