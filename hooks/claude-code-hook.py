@@ -179,8 +179,21 @@ def read_prompt(session_id):
         return ""
 
 
+MACHINE_PROMPT_MARKERS = (
+    "<task-notification>", "<command-name>",
+    "<local-command-stdout>", "<system-reminder>",
+)
+
+
 def on_user_prompt_submit(data):
-    save_prompt(data.get("session_id"), data.get("prompt", ""))
+    prompt = data.get("prompt", "")
+    # Harness-injected prompts (background task results, command echoes) are
+    # not the user attending the chat: don't dismiss its banner, and don't
+    # let raw markup become the next banner body.
+    if prompt.lstrip().startswith(MACHINE_PROMPT_MARKERS):
+        save_prompt(data.get("session_id"), "background task finished")
+        return
+    save_prompt(data.get("session_id"), prompt)
     group = chat_group(data.get("transcript_path"), data.get("session_id"))
     notifyd({"cmd": "remove", "group": group})
 
