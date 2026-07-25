@@ -148,6 +148,37 @@ def read_prompt(session_id):
         return ""
 
 
+MACHINE_TURN_BODY = "background task finished"
+
+
+def last_assistant_text(transcript_path):
+    """The turn's final user-facing assistant text (sidechains excluded).
+    Machine-prompt turns banner with the session's actual reply — or not at
+    all, when the turn produced nothing user-facing."""
+    if not transcript_path or not os.path.exists(transcript_path):
+        return ""
+    try:
+        with open(transcript_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 262144))
+            lines = f.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    for line in reversed(lines):
+        if '"type":"assistant"' not in line:
+            continue
+        try:
+            record = json.loads(line)
+        except Exception:
+            continue
+        if record.get("type") != "assistant" or record.get("isSidechain"):
+            continue
+        for block in record.get("message", {}).get("content", []):
+            if isinstance(block, dict) and block.get("type") == "text"                     and block.get("text", "").strip():
+                return block["text"]
+    return ""
+
+
 MACHINE_PROMPT_MARKERS = (
     "<task-notification>", "<command-name>",
     "<local-command-stdout>", "<system-reminder>",
@@ -160,7 +191,7 @@ def on_user_prompt_submit(data):
     # not the user attending the chat: don't dismiss its banner, and don't
     # let raw markup become the next banner body.
     if prompt.lstrip().startswith(MACHINE_PROMPT_MARKERS):
-        save_prompt(data.get("session_id"), "background task finished")
+        save_prompt(data.get("session_id"), MACHINE_TURN_BODY)
         return
     save_prompt(data.get("session_id"), prompt)
     group = chat_group(data.get("transcript_path"), data.get("session_id"))
@@ -168,7 +199,15 @@ def on_user_prompt_submit(data):
 
 
 def on_stop(data):
-    body = excerpt(read_prompt(data.get("session_id"))) or "done"
+    stored = read_prompt(data.get("session_id"))
+    if stored == MACHINE_TURN_BODY:
+        # background-task turn: the placeholder is useless — show what the
+        # session actually said, or stay silent if nothing user-facing
+        reply = last_assistant_text(data.get("transcript_path"))
+        if not reply.strip():
+            return
+        stored = reply
+    body = excerpt(stored) or "done"
     notifyd({
         "cmd": "post",
         "group": chat_group(data.get("transcript_path"), data.get("session_id")),
