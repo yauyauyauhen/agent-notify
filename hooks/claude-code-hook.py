@@ -172,6 +172,9 @@ def on_stop(data):
         "group": chat_group(data.get("transcript_path"), data.get("session_id")),
         "title": build_title(data.get("cwd"), data.get("transcript_path")),
         "message": body,
+        # named chats: /clear keeps the name but changes the group, so the
+        # newer banner replaces any same-titled older one
+        "replace_same_title": chat_title(data.get("transcript_path")) is not None,
     })
 
 
@@ -184,6 +187,7 @@ def on_notification(data):
         "group": chat_group(data.get("transcript_path"), data.get("session_id")),
         "title": build_title(data.get("cwd"), data.get("transcript_path")),
         "message": excerpt(message) or "Notification",
+        "replace_same_title": chat_title(data.get("transcript_path")) is not None,
     })
 
 

@@ -81,12 +81,24 @@ func removeGroup(_ group: String) -> Int {
     return removed
 }
 
-func post(group: String, title: String, message: String) {
+func post(group: String, title: String, message: String, replaceSameTitle: Bool) {
     // Strays: same group but a different identifier (posted by an external
     // fallback tool). Remove those explicitly.
     for old in center.deliveredNotifications
     where old.userInfo?["groupID"] as? String == group && old.identifier != group {
         center.removeDeliveredNotification(old)
+    }
+    // Named chats: /clear keeps the chat's name but changes its history
+    // anchor (the group), so a pre-clear banner would otherwise linger next
+    // to identically-titled new ones. Two banners wearing the same full
+    // title are indistinguishable on screen — the newer one wins. Clients
+    // set this flag only for named chats; unnamed chats share the bare repo
+    // title and must keep strict per-group isolation.
+    if replaceSameTitle {
+        for old in center.deliveredNotifications
+        where old.title == title && old.identifier != group {
+            center.removeDeliveredNotification(old)
+        }
     }
     let n = NSUserNotification()
     n.title = title
@@ -118,7 +130,8 @@ func handle(_ request: [String: Any]) -> [String: Any] {
               let message = request["message"] as? String else {
             return ["ok": false, "error": "post needs group/title/message"]
         }
-        post(group: group, title: title, message: message)
+        post(group: group, title: title, message: message,
+             replaceSameTitle: request["replace_same_title"] as? Bool ?? false)
         return ["ok": true]
     case "remove":
         guard let group = request["group"] as? String else {
