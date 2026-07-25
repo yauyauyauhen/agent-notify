@@ -8,6 +8,7 @@ Claude Code hooks (install.md does this for you):
   UserPromptSubmit -> python3 ~/.agent-notify/hook.py UserPromptSubmit
   Stop             -> python3 ~/.agent-notify/hook.py Stop
   Notification     -> python3 ~/.agent-notify/hook.py Notification
+  SessionStart     -> python3 ~/.agent-notify/hook.py SessionStart
 
 Privacy: no network access. The script talks only to the local agent-notify
 daemon over a unix socket, and keeps per-session last-prompt files under
@@ -191,10 +192,26 @@ def on_notification(data):
     })
 
 
+def on_session_start(data):
+    """/clear fires SessionStart with source=clear: the chat keeps its name
+    but abandons its old group, so dismiss any pending banner by TITLE.
+    Named chats only — unnamed chats share the bare repo title and
+    title-removal would wipe other chats' banners."""
+    if data.get("source") != "clear":
+        return
+    if chat_title(data.get("transcript_path")) is None:
+        return
+    notifyd({
+        "cmd": "remove-title",
+        "title": build_title(data.get("cwd"), data.get("transcript_path")),
+    })
+
+
 HANDLERS = {
     "UserPromptSubmit": on_user_prompt_submit,
     "Stop": on_stop,
     "Notification": on_notification,
+    "SessionStart": on_session_start,
 }
 
 

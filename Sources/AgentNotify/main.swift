@@ -138,6 +138,16 @@ func handle(_ request: [String: Any]) -> [String: Any] {
             return ["ok": false, "error": "remove needs group"]
         }
         return ["ok": true, "removed": removeGroup(group)]
+    case "remove-title":
+        guard let title = request["title"] as? String else {
+            return ["ok": false, "error": "remove-title needs title"]
+        }
+        var removed = 0
+        for n in center.deliveredNotifications where n.title == title {
+            center.removeDeliveredNotification(n)
+            removed += 1
+        }
+        return ["ok": true, "removed": removed]
     case "list":
         return ["ok": true, "notifications": listAll()]
     default:

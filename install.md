@@ -7,7 +7,7 @@ You are an AI coding agent installing [agent-notify](https://github.com/yauyauya
 - `~/.agent-notify/` — source checkout, built binary, the Claude Code hook script, and small per-session state files
 - `~/Library/LaunchAgents/dev.agent-notify.plist` — keeps the daemon running
 - `~/.agent-notify.sock` — the local unix socket the daemon listens on
-- `~/.claude/settings.json` — three hook entries are **merged in** (existing content preserved; a backup is created first)
+- `~/.claude/settings.json` — four hook entries are **merged in** (existing content preserved; a backup is created first)
 
 Nothing else is modified. The daemon and hook contain no network code — notifications never leave the machine. No step requires sudo.
 
@@ -123,7 +123,7 @@ import json, os
 path = os.path.expanduser("~/.claude/settings.json")
 settings = json.load(open(path)) if os.path.exists(path) else {}
 hooks = settings.setdefault("hooks", {})
-for event in ["UserPromptSubmit", "Stop", "Notification"]:
+for event in ["UserPromptSubmit", "Stop", "Notification", "SessionStart"]:
     entries = hooks.setdefault(event, [])
     command = f"python3 ~/.agent-notify/hook.py {event}"
     if not any(command in json.dumps(e) for e in entries):
@@ -138,7 +138,7 @@ EOF
 
 ```bash
 python3 -c "import json,os; json.load(open(os.path.expanduser('~/.claude/settings.json')))" && echo "settings valid"
-grep -c "agent-notify/hook.py" ~/.claude/settings.json   # expect 3
+grep -c "agent-notify/hook.py" ~/.claude/settings.json   # expect 4
 ```
 
 ## 8. End-to-end test
