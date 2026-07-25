@@ -9,6 +9,7 @@ Claude Code hooks (install.md does this for you):
   Stop             -> python3 ~/.agent-notify/hook.py Stop
   Notification     -> python3 ~/.agent-notify/hook.py Notification
   SessionStart     -> python3 ~/.agent-notify/hook.py SessionStart
+  SessionEnd       -> python3 ~/.agent-notify/hook.py SessionEnd
 
 Privacy: no network access. The script talks only to the local agent-notify
 daemon over a unix socket, and keeps per-session last-prompt files under
@@ -207,11 +208,22 @@ def on_session_start(data):
     })
 
 
+def on_session_end(data):
+    """SessionEnd, any reason (/exit, Ctrl+D, /clear ending the old session,
+    terminal window closed gracefully): the session is gone, so its banner
+    no longer applies. A force-killed terminal fires no hooks."""
+    notifyd({
+        "cmd": "remove",
+        "group": chat_group(data.get("transcript_path"), data.get("session_id")),
+    })
+
+
 HANDLERS = {
     "UserPromptSubmit": on_user_prompt_submit,
     "Stop": on_stop,
     "Notification": on_notification,
     "SessionStart": on_session_start,
+    "SessionEnd": on_session_end,
 }
 
 
