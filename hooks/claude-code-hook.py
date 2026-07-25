@@ -22,7 +22,6 @@ import socket
 import subprocess
 import sys
 import time
-from datetime import datetime
 
 SOCKET_PATH = os.environ.get(
     "AGENT_NOTIFY_SOCKET", os.path.expanduser("~/.agent-notify.sock")
@@ -70,55 +69,23 @@ def chat_group(transcript_path, session_id):
 
 
 def chat_title(transcript_path):
-    """Chat name set via /rename — the last custom-title record, EXCEPT a
-    name merely inherited through /clear. Both /clear and --resume copy the
-    old title to line 1 of the fresh file; a resumed file also carries old
-    history (its first user record predates the file), while a cleared one
-    starts truly fresh — there the inherited name no longer applies.
-    Renaming after a clear writes a new value and wins."""
+    """Chat name set via /rename — the last custom-title record. Titles
+    survive /clear by design: Claude Code keeps a chat's name until it is
+    renamed or a new chat is opened."""
     if not transcript_path or not os.path.exists(transcript_path):
         return None
-    titles = []  # (line_number, value)
     result = subprocess.run(
-        ["grep", "-n", '"customTitle"', transcript_path],
+        ["grep", '"customTitle"', transcript_path],
         capture_output=True, text=True, check=False, timeout=5,
     )
-    for line in result.stdout.splitlines():
-        lineno, _, payload = line.partition(":")
+    for line in reversed(result.stdout.splitlines()):
         try:
-            record = json.loads(payload)
+            record = json.loads(line)
             if record.get("type") == "custom-title":
-                titles.append((int(lineno), record["customTitle"]))
+                return record["customTitle"]
         except Exception:
             continue
-    if not titles:
-        return None
-    effective = titles[-1][1]
-
-    first_user = subprocess.run(
-        ["grep", "-n", "-m", "1", '"type":"user"', transcript_path],
-        capture_output=True, text=True, check=False, timeout=5,
-    ).stdout
-    user_lineno, _, user_payload = first_user.partition(":")
-    try:
-        user_record = json.loads(user_payload)
-        user_line = int(user_lineno)
-    except Exception:
-        return effective  # no user record yet — keep the title
-
-    inherited = [v for n, v in titles if n < user_line]
-    if not inherited or effective != inherited[-1]:
-        return effective  # named in this session (or renamed post-clear)
-
-    try:
-        ts = datetime.fromisoformat(
-            user_record["timestamp"].replace("Z", "+00:00")
-        ).timestamp()
-        if abs(ts - os.stat(transcript_path).st_birthtime) < 180:
-            return None  # fresh start (/clear): inherited name dropped
-    except Exception:
-        pass
-    return effective
+    return None
 
 
 def worktree_parts(cwd):
