@@ -39,6 +39,89 @@ func log(_ message: String) {
 
 let center = UNUserNotificationCenter.current()
 
+// MARK: - Window targeting (optional, needs one Accessibility grant)
+// A clicked banner's own title ("chat / worktree / repo") doubles as the
+// focus hint: match its parts, most specific first, against the terminal's
+// window titles and raise the matched window before activating the app.
+// Without the Accessibility grant this quietly degrades to app-level focus.
+
+func raiseWindow(hints: [String]) -> Bool {
+    guard let running = NSRunningApplication
+            .runningApplications(withBundleIdentifier: focusTarget).first else {
+        log("raise: focus target not running")
+        return false
+    }
+    let ax = AXUIElementCreateApplication(running.processIdentifier)
+    var winsRef: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute as CFString, &winsRef) == .success,
+          let windows = winsRef as? [AXUIElement] else {
+        log("raise: window enumeration failed")
+        return false
+    }
+    var titles: [(AXUIElement, String)] = []
+    for window in windows {
+        var titleRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef)
+        titles.append((window, (titleRef as? String) ?? ""))
+    }
+    log("raise: hints=\(hints) windows=\(titles.map { $0.1 })")
+    for hint in hints where !hint.isEmpty {
+        for (window, title) in titles where !title.isEmpty {
+            if title.localizedCaseInsensitiveContains(hint) {
+                AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+                AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+                log("raise: matched '\(title)' via hint '\(hint)'")
+                return true
+            }
+        }
+    }
+    // Cross-Space path: AX window enumeration only sees the CURRENT Space,
+    // but the app's Window menu lists every window on every Space, and
+    // pressing a window's menu item focuses it including the Space switch.
+    if pressWindowMenuItem(hints: hints, appAX: ax) {
+        return true
+    }
+    log("raise: no window matched")
+    return false
+}
+
+func pressWindowMenuItem(hints: [String], appAX: AXUIElement) -> Bool {
+    var menubarRef: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(appAX, kAXMenuBarAttribute as CFString, &menubarRef) == .success,
+          CFGetTypeID(menubarRef!) == AXUIElementGetTypeID() else { return false }
+    let menubar = menubarRef as! AXUIElement
+    var menusRef: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(menubar, kAXChildrenAttribute as CFString, &menusRef) == .success,
+          let menus = menusRef as? [AXUIElement] else { return false }
+    for menu in menus {
+        var titleRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(menu, kAXTitleAttribute as CFString, &titleRef)
+        guard (titleRef as? String) == "Window" else { continue }
+        var subRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(menu, kAXChildrenAttribute as CFString, &subRef) == .success,
+              let submenus = subRef as? [AXUIElement], let itemsMenu = submenus.first else { return false }
+        var itemsRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(itemsMenu, kAXChildrenAttribute as CFString, &itemsRef) == .success,
+              let items = itemsRef as? [AXUIElement] else { return false }
+        for hint in hints where !hint.isEmpty {
+            for item in items {
+                var itemTitleRef: CFTypeRef?
+                AXUIElementCopyAttributeValue(item, kAXTitleAttribute as CFString, &itemTitleRef)
+                guard let itemTitle = itemTitleRef as? String, !itemTitle.isEmpty else { continue }
+                if itemTitle.localizedCaseInsensitiveContains(hint) {
+                    AXUIElementPerformAction(item, kAXPressAction as CFString)
+                    log("raise: pressed Window-menu item '\(itemTitle)' via hint '\(hint)'")
+                    return true
+                }
+            }
+        }
+        log("raise: no Window-menu match")
+        return false
+    }
+    log("raise: no Window menu found")
+    return false
+}
+
 final class Delegate: NSObject, UNUserNotificationCenterDelegate {
     // Present even if this (background) app were ever considered frontmost.
     func userNotificationCenter(_ center: UNUserNotificationCenter,
@@ -49,19 +132,55 @@ final class Delegate: NSObject, UNUserNotificationCenterDelegate {
     }
 
     // Body click: macOS already dismisses the clicked banner; we add the
-    // second half of the gesture — bring the terminal forward. Scoped to the
-    // clicked identifier only; no other banner is touched.
+    // second half of the gesture — bring the terminal forward, at the
+    // specific window when the banner title identifies one.
+    //
+    // Focus mechanics (macOS 26): cooperative activation ignores a plain
+    // "activate that app" request from a background process. The click grants
+    // THIS app the activation, so we must explicitly yield it to the terminal
+    // and activate the running instance — openApplication alone silently
+    // does nothing.
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
+        log("didReceive action=\(response.actionIdentifier)")
         if response.actionIdentifier == UNNotificationDefaultActionIdentifier {
             let id = response.notification.request.identifier
+            let bannerTitle = response.notification.request.content.title
             center.removeDeliveredNotifications(withIdentifiers: [id])
             DispatchQueue.main.async {
-                if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: focusTarget) {
+                let prompt = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+                if AXIsProcessTrustedWithOptions(prompt as CFDictionary) {
+                    _ = raiseWindow(hints: bannerTitle.components(separatedBy: " / "))
+                } else {
+                    log("accessibility not granted — window targeting skipped")
+                }
+                if #available(macOS 14.0, *) {
+                    NSApp.yieldActivation(toApplicationWithBundleIdentifier: focusTarget)
+                }
+                if let running = NSRunningApplication
+                        .runningApplications(withBundleIdentifier: focusTarget).first {
+                    let ok: Bool
+                    if #available(macOS 14.0, *) {
+                        ok = running.activate(from: .current, options: [])
+                    } else {
+                        ok = running.activate(options: [.activateIgnoringOtherApps])
+                    }
+                    log("activate \(focusTarget) -> \(ok)")
+                } else if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: focusTarget) {
                     NSWorkspace.shared.openApplication(at: url,
                                                        configuration: NSWorkspace.OpenConfiguration())
+                    log("launched \(focusTarget)")
+                } else {
+                    log("focus target \(focusTarget) not found")
                 }
+                // Belt and suspenders: a child `open` process is a fresh
+                // non-app client of LaunchServices, exempt from the
+                // cooperative-activation rules that ignore background apps.
+                let opener = Process()
+                opener.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+                opener.arguments = ["-b", focusTarget]
+                try? opener.run()
             }
         }
         completionHandler()
@@ -182,6 +301,28 @@ func handle(_ request: [String: Any]) -> [String: Any] {
         return ["ok": true, "removed": removeTitle(title)]
     case "list":
         return ["ok": true, "notifications": listAll()]
+    case "windows":
+        // Diagnostic: the focus target's window titles as AX sees them
+        // (current Space only — that's the API's limit, not ours).
+        guard let running = NSRunningApplication
+                .runningApplications(withBundleIdentifier: focusTarget).first else {
+            return ["ok": false, "error": "focus target not running"]
+        }
+        guard AXIsProcessTrusted() else {
+            return ["ok": false, "error": "accessibility not granted"]
+        }
+        let ax = AXUIElementCreateApplication(running.processIdentifier)
+        var winsRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute as CFString, &winsRef) == .success,
+              let windows = winsRef as? [AXUIElement] else {
+            return ["ok": false, "error": "ax window enumeration failed"]
+        }
+        let titles = windows.map { window -> String in
+            var titleRef: CFTypeRef?
+            AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef)
+            return (titleRef as? String) ?? "<untitled>"
+        }
+        return ["ok": true, "windows": titles]
     default:
         return ["ok": false, "error": "unknown cmd"]
     }
@@ -247,7 +388,10 @@ DispatchQueue.global().async {
 
 // Full AppKit event machinery (not a bare RunLoop): notification click
 // responses are routed by the system through app activation, and an
-// NSApplication-less process can miss them.
+// NSApplication-less process can miss them. Policy .accessory (not
+// .prohibited): a prohibited app cannot be activated at all, so it can never
+// hold the activation a banner click grants — and its focus hand-off to the
+// terminal is silently ignored.
 let app = NSApplication.shared
-app.setActivationPolicy(.prohibited)
+app.setActivationPolicy(.accessory)
 app.run()

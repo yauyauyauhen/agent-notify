@@ -13,7 +13,7 @@ agent-notify makes the notification stack itself the answer — a live list of e
 - **One notification banner on screen per agent session** — each finished (or input-waiting) session holds exactly one banner. The stack *is* your "sessions awaiting me" list.
 - **Self-cleaning** — a session's next notification replaces its previous one in place, and the moment you follow up in a chat, its banner disappears on its own. No duplicates, no stale pile: what's on screen is only what still needs you.
 - **Easy to scan** — banners are titled `chat name / worktree / repo`, with the worktree shown only when it isn't the main checkout. Name your chats (`/rename` in Claude Code) and the stack reads like a status board.
-- **Click to jump and dismiss** — clicking a banner dismisses exactly that one and focuses your terminal; every other agent's notification stays put until you click it or follow up with that agent.
+- **Click to jump and dismiss** — clicking a banner dismisses exactly that one and focuses your terminal. Grant the daemon Accessibility (optional, one click) and it goes further: it matches the banner's title against your terminal's window titles and raises the **specific window** that session lives in — including windows on other Spaces, via the app's Window menu. Without the grant, you get app-level focus.
 - **Reliable by architecture** — a single daemon owns every banner through one connection to macOS's notification system, using the modern `UserNotifications` API under its own app identity. The whole failure class that haunts classic CLI notifiers — banners randomly wiping each other — can't happen here (see [the bug](#the-bug-this-fixes) below).
 
 agent-notify runs as its own tiny background app with its own notification permission — it doesn't impersonate or depend on your terminal. Clicking a banner focuses whichever terminal you configure: we run it with **Ghostty**, and it works the same with iTerm2, Cursor, Terminal.app, Kitty, or anything else with a bundle id. Banners can even wear your terminal's icon — drop its `.icns` into the app bundle (one optional install step).
@@ -75,6 +75,10 @@ Newline-delimited JSON over the unix socket. One request, one reply, per connect
 
 {"cmd":"list"}
 // -> {"ok":true,"notifications":[{"group":"...","title":"...","message":"...","deliveredAt":"..."}]}
+
+{"cmd":"windows"}
+// -> {"ok":true,"windows":["travel-planner","blog"]}   (diagnostic: the focus
+//    target's window titles as Accessibility sees them, current Space only)
 ```
 
 `list` is ground truth: the daemon owns every banner it posted, so what it enumerates is what's on screen.
@@ -92,7 +96,8 @@ agent-notify v1 was a single supervisor daemon that fixed the race while still i
 ## Caveats
 
 - macOS notification permission is granted per app, by a human: after install, one **Allow** click, plus setting the style to **Alerts** in System Settings (the default Banners style auto-hides after a few seconds, which defeats an attention queue).
-- The app bundle is ad-hoc signed at install time — fine for a LaunchAgent on your own machine; distribution through Gatekeeper would need a real signing identity.
+- Window targeting matches on window *titles* (a window shows its focused pane's title), so it's exact for one-window-per-project layouts and degrades gracefully to app focus otherwise. Pane-level jumping has no public interface in any terminal we know of.
+- The app bundle is ad-hoc signed at install time — fine for a LaunchAgent on your own machine. One consequence: macOS ties Accessibility grants to the code signature, so after **updating** the daemon you may need to re-grant (toggle off/on, or `tccutil reset Accessibility dev.agent-notify.app` and re-approve). Signing with a stable local certificate identity makes grants survive updates; distribution through Gatekeeper would need a real one.
 - A force-killed terminal fires no hooks, so its last banner stays until clicked. Physics.
 
 ## Credits
