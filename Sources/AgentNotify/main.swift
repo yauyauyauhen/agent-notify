@@ -1,123 +1,160 @@
-// agent-notify — a single supervisor daemon for macOS CLI notifications.
+// agent-notify — single-supervisor notification daemon for AI-agent sessions.
 //
-// Why this exists: tools like alerter/terminal-notifier spawn one process per
-// banner, all impersonating the same app bundle. Those processes share one
-// delivered-notification list and one delegate slot inside macOS's
-// notification daemon; when any of them exits while its banner is still
-// registered, usernoted's connection cleanup sometimes sweeps SIBLING banners
-// too (races observed as: clicking one notification dismisses several,
-// killing one process wipes the whole stack). One long-lived process owning
-// ALL banners through one connection removes that race by construction.
-// Full diagnosis in the README.
+// v2: modern UNUserNotificationCenter API, running as its own real app
+// bundle. v1 impersonated the terminal's bundle identity over the legacy
+// NSUserNotification API — that died the day the terminal was Ghostty:
+// usernoted refuses legacy connections for any bundle id that has ever
+// registered as a modern notification client ("You can't mix modern clients
+// with legacy clients"), and modern terminals register. Owning our own
+// identity removes the hack entirely — and with it the whole class of
+// connection-scoped races that plague per-banner notifier processes
+// (https://github.com/vjeantet/alerter/issues/75).
 //
 // Protocol: newline-delimited JSON over a unix stream socket.
-//   {"cmd":"post","group":G,"title":T,"message":M}  -> {"ok":true}
-//   {"cmd":"remove","group":G}                      -> {"ok":true,"removed":N}
-//   {"cmd":"list"}                                  -> {"ok":true,"notifications":[...]}
+//   {"cmd":"post","group":G,"title":T,"message":M,"replace_same_title":B} -> {"ok":true}
+//   {"cmd":"remove","group":G}       -> {"ok":true,"removed":N}
+//   {"cmd":"remove-title","title":T} -> {"ok":true,"removed":N}
+//   {"cmd":"list"}                   -> {"ok":true,"notifications":[...]}
 // Unknown command or bad JSON -> {"ok":false,"error":"..."}
 //
 // The daemon never removes banners on its own exit: delivered notifications
-// belong to the (spoofed) bundle, so a restarted daemon manages banners
+// belong to the bundle identity, so a restarted daemon manages banners
 // posted by its predecessor.
 
 import AppKit
-import BundleHook
+import UserNotifications
 
 let args = CommandLine.arguments
 guard args.count == 3 else {
-    FileHandle.standardError.write("usage: agent-notify <sender-bundle-id> <socket-path>\n".data(using: .utf8)!)
+    FileHandle.standardError.write("usage: agent-notify <focus-bundle-id> <socket-path>\n".data(using: .utf8)!)
     exit(2)
 }
-let sender = args[1]
+// The app to bring forward when a banner is clicked — your terminal.
+let focusTarget = args[1]
 let socketPath = args[2]
 
-_ = InstallFakeBundleIdentifierHook(sender)
+func log(_ message: String) {
+    FileHandle.standardError.write("agent-notify: \(message)\n".data(using: .utf8)!)
+}
 
-final class Delegate: NSObject, NSUserNotificationCenterDelegate {
-    // Show banners even while the impersonated app (Cursor) is frontmost.
-    func userNotificationCenter(_ center: NSUserNotificationCenter,
-                                shouldPresent notification: NSUserNotification) -> Bool {
-        return true
+let center = UNUserNotificationCenter.current()
+
+final class Delegate: NSObject, UNUserNotificationCenterDelegate {
+    // Present even if this (background) app were ever considered frontmost.
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler:
+                                    @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .list])
     }
 
-    // Click routing lands HERE (the daemon holds the identity's connection),
-    // so body/button clicks must be handled explicitly: dismiss exactly the
-    // clicked banner and bring the real app forward. Scoped by identifier —
-    // no other banner is touched.
-    func userNotificationCenter(_ center: NSUserNotificationCenter,
-                                didActivate notification: NSUserNotification) {
-        if let id = notification.identifier {
-            for n in center.deliveredNotifications where n.identifier == id {
-                center.removeDeliveredNotification(n)
+    // Body click: macOS already dismisses the clicked banner; we add the
+    // second half of the gesture — bring the terminal forward. Scoped to the
+    // clicked identifier only; no other banner is touched.
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        if response.actionIdentifier == UNNotificationDefaultActionIdentifier {
+            let id = response.notification.request.identifier
+            center.removeDeliveredNotifications(withIdentifiers: [id])
+            DispatchQueue.main.async {
+                if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: focusTarget) {
+                    NSWorkspace.shared.openApplication(at: url,
+                                                       configuration: NSWorkspace.OpenConfiguration())
+                }
             }
         }
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: sender) {
-            NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
-        }
+        completionHandler()
     }
 }
 
 let delegate = Delegate()
-let center = NSUserNotificationCenter.default
 center.delegate = delegate
 
-// MARK: - Notification operations (main thread only)
+// One-time system permission prompt (state is per bundle id; notDetermined
+// only on the very first launch). On current macOS the prompt itself arrives
+// AS a notification — click it and Allow. Style must be set to Alerts by the
+// user in System Settings; that part is not programmable.
+center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+    log("authorization granted=\(granted)" + (error.map { " error=\($0)" } ?? ""))
+}
+
+// MARK: - Notification operations
+// All requests run on one serial queue; modern-API async calls are bridged
+// with semaphores (their completions fire on the framework's own queue, so
+// waiting here cannot deadlock).
+
+let ops = DispatchQueue(label: "agent-notify.ops")
+
+func delivered() -> [UNNotification] {
+    var result: [UNNotification] = []
+    let sem = DispatchSemaphore(value: 0)
+    center.getDeliveredNotifications { list in
+        result = list
+        sem.signal()
+    }
+    _ = sem.wait(timeout: .now() + 5)
+    return result
+}
 
 func removeGroup(_ group: String) -> Int {
-    var removed = 0
-    for n in center.deliveredNotifications
-    where n.userInfo?["groupID"] as? String == group {
-        center.removeDeliveredNotification(n)
-        removed += 1
+    let matching = delivered().filter {
+        $0.request.identifier == group ||
+        $0.request.content.userInfo["groupID"] as? String == group
     }
-    // Second, independent shot by CONSTRUCTED identifier: the notification
-    // bridge occasionally drops an enumeration-based removal (the banner
-    // survives on screen), and records delivered by a previous daemon
-    // instance are invisible to this connection's enumeration entirely.
-    // Identifier addressing reaches both — verified live on a stuck banner.
-    let probe = NSUserNotification()
-    probe.identifier = group
-    center.removeDeliveredNotification(probe)
-    return removed
+    // Identifier addressing is server-side and works even for records this
+    // process never delivered (a predecessor daemon's banners).
+    center.removeDeliveredNotifications(withIdentifiers: [group] + matching.map { $0.request.identifier })
+    return matching.count
+}
+
+func removeTitle(_ title: String) -> Int {
+    let ids = delivered().filter { $0.request.content.title == title }
+        .map { $0.request.identifier }
+    center.removeDeliveredNotifications(withIdentifiers: ids)
+    return ids.count
 }
 
 func post(group: String, title: String, message: String, replaceSameTitle: Bool) {
-    // Strays: same group but a different identifier (posted by an external
-    // fallback tool). Remove those explicitly.
-    for old in center.deliveredNotifications
-    where old.userInfo?["groupID"] as? String == group && old.identifier != group {
-        center.removeDeliveredNotification(old)
-    }
-    // Named chats: /clear keeps the chat's name but changes its history
-    // anchor (the group), so a pre-clear banner would otherwise linger next
-    // to identically-titled new ones. Two banners wearing the same full
-    // title are indistinguishable on screen — the newer one wins. Clients
-    // set this flag only for named chats; unnamed chats share the bare repo
-    // title and must keep strict per-group isolation.
+    // replace_same_title serves renamed-but-regrouped sessions (Claude Code's
+    // /clear keeps a chat's name but changes its history anchor): the newer
+    // banner replaces any same-titled older one. Clients set it only for
+    // explicitly named chats; unnamed chats share bare repo titles and must
+    // keep strict per-group isolation.
     if replaceSameTitle {
-        for old in center.deliveredNotifications
-        where old.title == title && old.identifier != group {
-            center.removeDeliveredNotification(old)
-        }
+        let stale = delivered().filter {
+            $0.request.content.title == title && $0.request.identifier != group
+        }.map { $0.request.identifier }
+        center.removeDeliveredNotifications(withIdentifiers: stale)
     }
-    let n = NSUserNotification()
-    n.title = title
-    n.informativeText = message
-    // Fixed identifier per group: macOS replaces the previous banner IN
-    // PLACE, atomically. remove-then-deliver leaves a window where the
-    // removal updates the store but the rendered banner survives as a ghost.
-    n.identifier = group
-    n.userInfo = ["groupID": group, "uuid": group]
-    center.deliver(n)
+    let content = UNMutableNotificationContent()
+    content.title = title
+    content.body = message
+    content.userInfo = ["groupID": group]
+    // Fixed identifier per session: adding with an existing identifier
+    // replaces the previous banner in place, atomically.
+    let request = UNNotificationRequest(identifier: group, content: content, trigger: nil)
+    let sem = DispatchSemaphore(value: 0)
+    center.add(request) { error in
+        if let error { log("add failed: \(error)") }
+        sem.signal()
+    }
+    _ = sem.wait(timeout: .now() + 5)
 }
 
+let deliveredAtFormat: DateFormatter = {
+    let f = DateFormatter()
+    f.dateFormat = "yyyy-MM-dd HH:mm:ss Z"
+    return f
+}()
+
 func listAll() -> [[String: String]] {
-    return center.deliveredNotifications.map { n in
+    return delivered().map { n in
         [
-            "group": n.userInfo?["groupID"] as? String ?? "",
-            "title": n.title ?? "",
-            "message": n.informativeText ?? "",
-            "deliveredAt": n.actualDeliveryDate.map { "\($0)" } ?? "",
+            "group": n.request.identifier,
+            "title": n.request.content.title,
+            "message": n.request.content.body,
+            "deliveredAt": deliveredAtFormat.string(from: n.date),
         ]
     }
 }
@@ -142,12 +179,7 @@ func handle(_ request: [String: Any]) -> [String: Any] {
         guard let title = request["title"] as? String else {
             return ["ok": false, "error": "remove-title needs title"]
         }
-        var removed = 0
-        for n in center.deliveredNotifications where n.title == title {
-            center.removeDeliveredNotification(n)
-            removed += 1
-        }
-        return ["ok": true, "removed": removed]
+        return ["ok": true, "removed": removeTitle(title)]
     case "list":
         return ["ok": true, "notifications": listAll()]
     default:
@@ -179,7 +211,8 @@ let bindResult = withUnsafePointer(to: &addr) {
     }
 }
 guard bindResult == 0 else { perror("bind"); exit(1) }
-chmod(socketPath, 0o600)  // owner-only, independent of the user's umask
+// The socket is the write path for banners — keep it private to this user.
+chmod(socketPath, 0o600)
 guard listen(serverFD, 16) == 0 else { perror("listen"); exit(1) }
 
 DispatchQueue.global().async {
@@ -190,16 +223,17 @@ DispatchQueue.global().async {
             defer { close(clientFD) }
             var data = Data()
             var buf = [UInt8](repeating: 0, count: 4096)
-            while !data.contains(0x0A) {
+            // 1 MB cap: a well-formed request is <4 KB; anything larger is
+            // not a client we want to serve.
+            while !data.contains(0x0A) && data.count < 1_048_576 {
                 let n = read(clientFD, &buf, buf.count)
                 guard n > 0 else { break }
                 data.append(contentsOf: buf[0..<n])
-                if data.count > 1_048_576 { return }  // cap: drop absurd requests
             }
             guard let lineEnd = data.firstIndex(of: 0x0A) else { return }
             let reply: [String: Any]
             if let request = try? JSONSerialization.jsonObject(with: data[..<lineEnd]) as? [String: Any] {
-                reply = DispatchQueue.main.sync { handle(request) }
+                reply = ops.sync { handle(request) }
             } else {
                 reply = ["ok": false, "error": "bad json"]
             }
@@ -211,4 +245,9 @@ DispatchQueue.global().async {
     }
 }
 
-RunLoop.main.run()
+// Full AppKit event machinery (not a bare RunLoop): notification click
+// responses are routed by the system through app activation, and an
+// NSApplication-less process can miss them.
+let app = NSApplication.shared
+app.setActivationPolicy(.prohibited)
+app.run()

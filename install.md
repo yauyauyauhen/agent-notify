@@ -4,10 +4,11 @@ You are an AI coding agent installing [agent-notify](https://github.com/yauyauya
 
 **Complete list of what this installation touches** (tell your user before starting):
 
-- `~/.agent-notify/` — source checkout, built binary, the Claude Code hook script, and small per-session state files
+- `~/.agent-notify/` — source checkout, the assembled `AgentNotify.app` bundle, the Claude Code hook script, a daemon log, and small per-session state files
 - `~/Library/LaunchAgents/dev.agent-notify.plist` — keeps the daemon running
 - `~/.agent-notify.sock` — the local unix socket the daemon listens on
 - `~/.claude/settings.json` — five hook entries are **merged in** (existing content preserved; a backup is created first)
+- One macOS notification-permission grant for **AgentNotify** (the user clicks Allow, once)
 
 Nothing else is modified. The daemon and hook contain no network code — notifications never leave the machine. No step requires sudo.
 
@@ -28,23 +29,52 @@ If `swift` is missing, ask your user to run `xcode-select --install` (GUI prompt
 git clone https://github.com/yauyauyauhen/agent-notify ~/.agent-notify/src 2>/dev/null \
   || git -C ~/.agent-notify/src pull
 cd ~/.agent-notify/src && swift build -c release
-mkdir -p ~/.agent-notify/bin
-cp .build/release/agent-notify ~/.agent-notify/bin/agent-notify
 ```
 
-**Verify:** `~/.agent-notify/bin/agent-notify` exists and the build reported `Build complete`.
+**Verify:** the build reported `Build complete`.
 
-## 3. Detect the terminal app's identity
+## 3. Assemble the app bundle
 
-Notifications impersonate the app your user's sessions run in, so they get its icon and its existing notification permission. You are running inside that app right now:
+The daemon must live inside a real `.app` bundle — the bundle is its notification identity: macOS grants notification permission per bundle id, and the modern UserNotifications API only serves bundled apps.
+
+```bash
+mkdir -p ~/.agent-notify/AgentNotify.app/Contents/MacOS \
+         ~/.agent-notify/AgentNotify.app/Contents/Resources
+cp ~/.agent-notify/src/.build/release/agent-notify \
+   ~/.agent-notify/AgentNotify.app/Contents/MacOS/agent-notify
+cp ~/.agent-notify/src/examples/AgentNotify-Info.plist \
+   ~/.agent-notify/AgentNotify.app/Contents/Info.plist
+codesign --force --sign - ~/.agent-notify/AgentNotify.app
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+  -f ~/.agent-notify/AgentNotify.app
+```
+
+Optional — give banners your terminal's icon (they use the generic app icon otherwise). Example for Ghostty; any `.icns` works:
+
+```bash
+cp /Applications/Ghostty.app/Contents/Resources/Ghostty.icns \
+   ~/.agent-notify/AgentNotify.app/Contents/Resources/AppIcon.icns
+codesign --force --sign - ~/.agent-notify/AgentNotify.app
+```
+
+**Verify:**
+
+```bash
+plutil -lint ~/.agent-notify/AgentNotify.app/Contents/Info.plist
+codesign --verify ~/.agent-notify/AgentNotify.app && echo "bundle OK"
+```
+
+## 4. Detect the terminal to focus on click
+
+Clicking a banner brings the user's terminal forward. You are running inside that terminal right now:
 
 ```bash
 echo "${__CFBundleIdentifier:-com.apple.Terminal}"
 ```
 
-Use this value as `SENDER` below (e.g. `com.todesktop.230313mzl4w4u92` for Cursor, `com.googlecode.iterm2` for iTerm2). If the variable is empty and your user doesn't use Terminal.app, ask them which terminal they use.
+Use this value as `FOCUS_BUNDLE_ID` below (e.g. `com.mitchellh.ghostty` for Ghostty, `com.googlecode.iterm2` for iTerm2, `com.todesktop.230313mzl4w4u92` for Cursor). If the variable is empty and your user doesn't use Terminal.app, ask them which terminal they use.
 
-## 4. Install the LaunchAgent
+## 5. Install the LaunchAgent
 
 Write `~/Library/LaunchAgents/dev.agent-notify.plist` with the **actual values substituted** — launchd does not expand `$HOME` or variables:
 
@@ -57,8 +87,8 @@ Write `~/Library/LaunchAgents/dev.agent-notify.plist` with the **actual values s
 	<string>dev.agent-notify</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Users/USERNAME/.agent-notify/bin/agent-notify</string>
-		<string>SENDER</string>
+		<string>/Users/USERNAME/.agent-notify/AgentNotify.app/Contents/MacOS/agent-notify</string>
+		<string>FOCUS_BUNDLE_ID</string>
 		<string>/Users/USERNAME/.agent-notify.sock</string>
 	</array>
 	<key>RunAtLoad</key>
@@ -67,6 +97,8 @@ Write `~/Library/LaunchAgents/dev.agent-notify.plist` with the **actual values s
 	<true/>
 	<key>ProcessType</key>
 	<string>Background</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/USERNAME/.agent-notify/daemon.log</string>
 </dict>
 </plist>
 ```
@@ -85,7 +117,20 @@ launchctl bootstrap gui/$UID ~/Library/LaunchAgents/dev.agent-notify.plist 2>/de
 launchctl print gui/$UID/dev.agent-notify | grep "state = running"
 ```
 
-## 5. Verify the daemon answers
+## 6. Notification permission — needs the user
+
+First launch makes macOS ask for notification permission for **AgentNotify**. On current macOS the request itself arrives **as a notification** ("AgentNotify" Notifications / Notifications may include alerts, sounds, and icon badges). Tell your user to:
+
+1. Click that notification and choose **Allow**.
+2. In System Settings → Notifications → **AgentNotify**: set the style to **Alerts** (banners persist until handled — the attention-queue behavior depends on this) and set **grouping to Off** (every session's banner visible at a glance instead of a collapsed pile).
+
+**Verify** (only true after the user clicks Allow):
+
+```bash
+grep "authorization granted=true" ~/.agent-notify/daemon.log
+```
+
+## 7. Verify the daemon answers
 
 ```bash
 python3 - <<'EOF'
@@ -104,7 +149,7 @@ print("daemon OK")
 EOF
 ```
 
-## 6. Install the Claude Code hook
+## 8. Install the Claude Code hook
 
 ```bash
 cp ~/.agent-notify/src/hooks/claude-code-hook.py ~/.agent-notify/hook.py
@@ -112,7 +157,7 @@ chmod +x ~/.agent-notify/hook.py
 python3 -m py_compile ~/.agent-notify/hook.py && echo "hook OK"
 ```
 
-## 7. Wire the hooks into Claude Code
+## 9. Wire the hooks into Claude Code
 
 Back up first, then merge — this preserves any hooks the user already has:
 
@@ -141,7 +186,7 @@ python3 -c "import json,os; json.load(open(os.path.expanduser('~/.claude/setting
 grep -c "agent-notify/hook.py" ~/.claude/settings.json   # expect 5
 ```
 
-## 8. End-to-end test
+## 10. End-to-end test
 
 ```bash
 python3 - <<'EOF'
@@ -166,13 +211,13 @@ print("end-to-end OK")
 EOF
 ```
 
-Your user should see an "agent-notify installed" banner appear (with their terminal's icon) and vanish.
+Your user should see an "agent-notify installed" banner appear and vanish.
 
-## 9. Tell your user
+## 11. Tell your user
 
 - **Hooks take effect in new Claude Code sessions** — currently running sessions keep their old hook config until restarted.
-- If no banner appeared in step 8: check System Settings → Notifications for their terminal app — it must be allowed, ideally with the **Alerts** style so banners persist until handled.
-- Optional: setting notification grouping to **Off** for the terminal app shows every session's banner at a glance instead of a collapsed pile.
+- If no banner appeared in step 10: the permission from step 6 was probably not granted — check System Settings → Notifications → AgentNotify.
+- If Claude Code also posts its own native notifications in this terminal (Ghostty, Kitty and iTerm2 do this: "Claude Code — Claude is waiting for your input"), those are a separate, unmanaged path that duplicates agent-notify. Turning notifications **off for the terminal app** in System Settings silences the duplicates without touching agent-notify — it uses its own permission, not the terminal's.
 
 ## Uninstall
 
@@ -203,4 +248,4 @@ python3 -c "import json,os; json.load(open(os.path.expanduser('~/.claude/setting
 grep -c "agent-notify/hook.py" ~/.claude/settings.json   # expect 0
 ```
 
-The notification permission the terminal app already had is untouched (it wasn't granted for this tool).
+The AgentNotify entry in System Settings → Notifications disappears on its own once macOS notices the app is gone; it holds no data either way.

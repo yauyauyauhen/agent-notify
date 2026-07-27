@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Info.plist for the AgentNotify.app bundle (install.md assembles it).
+	     The bundle is what gives the daemon its own notification identity:
+	     macOS grants notification permission per bundle id, and the modern
+	     UserNotifications API only serves processes that live in a real app
+	     bundle. AppIcon.icns is optional — drop any .icns into
+	     Contents/Resources/ (your terminal's, for instance) and banners wear
+	     it; without one you get the generic app icon. -->
+	<key>CFBundleIdentifier</key>
+	<string>dev.agent-notify.app</string>
+	<key>CFBundleName</key>
+	<string>AgentNotify</string>
+	<key>CFBundleDisplayName</key>
+	<string>AgentNotify</string>
+	<key>CFBundleExecutable</key>
+	<string>agent-notify</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleShortVersionString</key>
+	<string>2.0</string>
+	<key>CFBundleVersion</key>
+	<string>2</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSUIElement</key>
+	<true/>
+</dict>
+</plist>

@@ -14,11 +14,11 @@ agent-notify makes the notification stack itself the answer — a live list of e
 - **Self-cleaning** — a session's next notification replaces its previous one in place, and the moment you follow up in a chat, its banner disappears on its own. No duplicates, no stale pile: what's on screen is only what still needs you.
 - **Easy to scan** — banners are titled `chat name / worktree / repo`, with the worktree shown only when it isn't the main checkout. Name your chats (`/rename` in Claude Code) and the stack reads like a status board.
 - **Click to jump and dismiss** — clicking a banner dismisses exactly that one and focuses your terminal; every other agent's notification stays put until you click it or follow up with that agent.
-- **Reliable by architecture** — existing CLI notifiers (alerter, terminal-notifier) spawn one process per banner, and those processes randomly wipe each other's notifications when several run at once (see [the bug](#the-bug-this-fixes) below). agent-notify is a single daemon that owns every banner through one connection, so that entire failure class can't happen.
+- **Reliable by architecture** — a single daemon owns every banner through one connection to macOS's notification system, using the modern `UserNotifications` API under its own app identity. The whole failure class that haunts classic CLI notifiers — banners randomly wiping each other — can't happen here (see [the bug](#the-bug-this-fixes) below).
 
-Notifications appear under your terminal app's identity (its icon, its permission) — Cursor, iTerm2, Terminal, whatever you use.
+agent-notify runs as its own tiny background app with its own notification permission — it doesn't impersonate or depend on your terminal. Clicking a banner focuses whichever terminal you configure: we run it with **Ghostty**, and it works the same with iTerm2, Cursor, Terminal.app, Kitty, or anything else with a bundle id. Banners can even wear your terminal's icon — drop its `.icns` into the app bundle (one optional install step).
 
-**Tip:** to see every session's banner at a glance instead of a collapsed pile, set notification grouping to **Off** for your terminal app in macOS notification settings.
+**Tip:** to see every session's banner at a glance instead of a collapsed pile, set notification grouping to **Off** for AgentNotify in macOS notification settings — and use the **Alerts** style so banners persist until handled.
 
 ## Install
 
@@ -26,31 +26,15 @@ Notifications appear under your terminal app's identity (its icon, its permissio
 
 > Install agent-notify by following https://github.com/yauyauyauhen/agent-notify/blob/main/install.md
 
-Your agent builds the daemon, detects your terminal app, sets up the LaunchAgent, and wires the ready-made Claude Code hook — [install.md](install.md) tells it exactly what to touch, how to verify every step, and how to uninstall. Out of the box this covers Claude Code; any other agent runner works via the three-command [protocol](#protocol).
+Your agent builds the daemon, assembles the app bundle, detects your terminal, sets up the LaunchAgent, and wires the ready-made Claude Code hook — [install.md](install.md) tells it exactly what to touch, how to verify every step, and how to uninstall. You click **Allow** once when macOS asks for notification permission. Out of the box this covers Claude Code; any other agent runner works via the four-command [protocol](#protocol).
 
-**Manual** — requires the Command Line Tools (Swift 6+ ships with them):
+**Manual** — requires the Command Line Tools (Swift 6+ ships with them). Follow the same steps install.md gives an agent: build, assemble `AgentNotify.app` (the bundle is the daemon's notification identity — the [Info.plist template](examples/AgentNotify-Info.plist) ships in `examples/`), install the [LaunchAgent](examples/dev.agent-notify.plist), grant permission, set Alerts style. The short version:
 
 ```bash
 git clone https://github.com/yauyauyauhen/agent-notify && cd agent-notify
 swift build -c release
-cp .build/release/agent-notify /usr/local/bin/
+# then follow install.md §3–6 to assemble the bundle and LaunchAgent
 ```
-
-Run it with the bundle ID you want notifications attributed to, and a socket path:
-
-```bash
-agent-notify com.todesktop.230313mzl4w4u92 ~/.agent-notify.sock   # Cursor
-# or com.googlecode.iterm2, com.apple.Terminal, ...
-```
-
-For always-on use, install the LaunchAgent from [`examples/dev.agent-notify.plist`](examples/dev.agent-notify.plist) (edit the paths and bundle ID):
-
-```bash
-cp examples/dev.agent-notify.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$UID ~/Library/LaunchAgents/dev.agent-notify.plist
-```
-
-The impersonated app must already have notification permission, with style "Alerts" so banners persist until handled.
 
 ## Claude Code integration
 
@@ -58,9 +42,10 @@ The ready-made hook ships in [`hooks/claude-code-hook.py`](hooks/claude-code-hoo
 
 - posts on `Stop` — title `chat name / worktree / repo`, body = your prompt, flattened and truncated to read as ~2 banner lines;
 - dismisses that chat's banner on `UserPromptSubmit`; shows `Notification` events' real text and suppresses idle "waiting for input" reminders;
-- keys banners by a **stable chat identity** (the uuid of the transcript's first user record), not the raw `session_id` — resuming a chat (`--resume`) mints a new session ID, and session-keyed banners would orphan on every resume. It also ignores a `/rename` title inherited through `/clear`.
+- keys banners by a **stable chat identity** (the uuid of the transcript's first user record), not the raw `session_id` — resuming a chat (`--resume`) mints a new session ID, and session-keyed banners would orphan on every resume;
+- handles `/clear` correctly: the chat keeps its `/rename` name but gets a new identity, so for named chats the newer banner replaces the same-titled older one, and the session lifecycle events (`SessionStart`/`SessionEnd`) dismiss banners a session leaves behind.
 
-Integrating a different agent runner? The hook is ~150 lines of dependency-free Python over the three-command protocol below — adapt away.
+Integrating a different agent runner? The hook is ~150 lines of dependency-free Python over the four-command protocol below — adapt away.
 
 `call()` is a ~10-line unix-socket helper; a ready-made client ships in [`client/agent-notify-client.py`](client/agent-notify-client.py):
 
@@ -78,32 +63,41 @@ Newline-delimited JSON over the unix socket. One request, one reply, per connect
 
 ```jsonc
 {"cmd":"post","group":"my-session","title":"build done","message":"47 tests passed"}
-// -> {"ok":true}    (replaces any previous banner with the same group)
+// -> {"ok":true}    (replaces any previous banner with the same group, in place)
+// optional: "replace_same_title":true also replaces same-titled banners from
+// other groups — for sessions that keep their name but change identity
 
 {"cmd":"remove","group":"my-session"}
+// -> {"ok":true,"removed":1}
+
+{"cmd":"remove-title","title":"build done"}
 // -> {"ok":true,"removed":1}
 
 {"cmd":"list"}
 // -> {"ok":true,"notifications":[{"group":"...","title":"...","message":"...","deliveredAt":"..."}]}
 ```
 
-`list` is ground truth: as the owner of the notification connection, the daemon can truthfully enumerate what's on screen — something no outside process can do for an impersonated identity.
+`list` is ground truth: the daemon owns every banner it posted, so what it enumerates is what's on screen.
 
 ## The bug this fixes
 
-Classic CLI notifiers impersonate your terminal's bundle ID and keep one process alive per banner. Run several in parallel and every process claims the *same* app identity inside macOS's notification daemon — sharing one delivered-notifications list, one delegate slot for click routing, and per-connection bookkeeping. When any process exits while its banner is still registered, the cleanup sometimes sweeps *sibling* banners along with it.
+Classic CLI notifiers (alerter, terminal-notifier) impersonate your terminal's bundle ID over the legacy `NSUserNotification` API and keep one process alive per banner. That design has two fatal problems:
 
-In practice that looks haunted: clicking one notification dismisses several; a new notification from one session silently kills another session's banner; the same setup works for days, then wipes your stack twice in an hour. It's a race, so it strikes "often", not "always" — and no flag can fix it, because the sharing itself is the bug (the notifier tools' own removal code is correctly scoped; we read it). A single supervisor owning all banners through one connection eliminates the race by construction. Full write-up in [vjeantet/alerter#75](https://github.com/vjeantet/alerter/issues/75).
+**The race.** Run several notifier processes in parallel and every one claims the *same* app identity inside macOS's notification daemon — sharing one delivered-notifications list, one delegate slot for click routing, and per-connection bookkeeping. When any process exits while its banner is still registered, the cleanup sometimes sweeps *sibling* banners along with it. In practice that looks haunted: clicking one notification dismisses several; a new notification from one session silently kills another session's banner; the same setup works for days, then wipes your stack twice in an hour. No flag can fix it, because the sharing itself is the bug. Full write-up in [vjeantet/alerter#75](https://github.com/vjeantet/alerter/issues/75).
+
+**The wall.** Impersonation only ever worked for app identities that never touch the notification system themselves. The moment your terminal is a *real* notification client — Ghostty, for instance, registers with the modern `UserNotifications` API — macOS hard-rejects every legacy connection claiming its identity: `Legacy client connecting to modern client. You can't mix modern clients with legacy clients`, straight from `usernoted`. Deliveries are silently denied with no error surfaced to the caller. The trick isn't just racy; for modern terminals it's impossible.
+
+agent-notify v1 was a single supervisor daemon that fixed the race while still impersonating. v2 removes the impersonation too: the daemon is a real (tiny) app with its own identity on the modern API — first-class in-place replacement, reliable removal and enumeration, proper click routing. Both failure modes are gone by construction, not by care.
 
 ## Caveats
 
-- Built on `NSUserNotification`, which Apple deprecated years ago and keeps shipping anyway (every CLI notifier relies on it — the modern `UserNotifications` framework requires a signed app bundle). A future macOS may break this entire tool category at once.
-- Bundle-identifier impersonation is a runtime swizzle of `NSBundle` — a well-worn community trick, not API.
-- One daemon serves one impersonated identity. Run a second instance (different socket) for a second identity.
+- macOS notification permission is granted per app, by a human: after install, one **Allow** click, plus setting the style to **Alerts** in System Settings (the default Banners style auto-hides after a few seconds, which defeats an attention queue).
+- The app bundle is ad-hoc signed at install time — fine for a LaunchAgent on your own machine; distribution through Gatekeeper would need a real signing identity.
+- A force-killed terminal fires no hooks, so its last banner stays until clicked. Physics.
 
 ## Credits
 
-- [alerter](https://github.com/vjeantet/alerter) by Valère Jeantet and contributors — delivery internals, MIT.
+- [alerter](https://github.com/vjeantet/alerter) by Valère Jeantet and contributors — v1 was built on its delivery internals, and its multi-process race is the bug that started this project. MIT.
 - [CCNotify](https://github.com/dazuiba/CCNotify) by dazuiba — the Claude Code notification hook this was born debugging.
 
 MIT © Eugene Klishevich

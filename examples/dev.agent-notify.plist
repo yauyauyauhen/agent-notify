@@ -4,15 +4,18 @@
 <dict>
 	<!-- LaunchAgent for agent-notify. Install to ~/Library/LaunchAgents/ and run:
 	     launchctl bootstrap gui/$UID ~/Library/LaunchAgents/dev.agent-notify.plist
-	     Replace the binary path, sender bundle id, and socket path with yours.
-	     The sender is the app your notifications appear as (its icon, its
-	     notification permission) — e.g. Cursor, iTerm2, Terminal. -->
+	     Replace the paths and the focus bundle id with yours. The first
+	     argument is the app a banner CLICK brings forward — your terminal
+	     (e.g. com.mitchellh.ghostty, com.googlecode.iterm2,
+	     com.todesktop.230313mzl4w4u92 for Cursor, com.apple.Terminal).
+	     The binary must run from inside AgentNotify.app — the bundle is the
+	     daemon's notification identity (see examples/AgentNotify-Info.plist). -->
 	<key>Label</key>
 	<string>dev.agent-notify</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/usr/local/bin/agent-notify</string>
-		<string>com.todesktop.230313mzl4w4u92</string>
+		<string>/Users/YOU/.agent-notify/AgentNotify.app/Contents/MacOS/agent-notify</string>
+		<string>com.mitchellh.ghostty</string>
 		<string>/Users/YOU/.agent-notify.sock</string>
 	</array>
 	<key>RunAtLoad</key>
@@ -21,5 +24,7 @@
 	<true/>
 	<key>ProcessType</key>
 	<string>Background</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/YOU/.agent-notify/daemon.log</string>
 </dict>
 </plist>
