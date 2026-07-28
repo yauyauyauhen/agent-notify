@@ -194,7 +194,7 @@ def on_user_prompt_submit(data):
     if "<agent-notify-dismiss>" in prompt or prompt.strip() == "/ok":
         notifyd({"cmd": "remove",
                  "group": chat_group(data.get("transcript_path"), data.get("session_id"))})
-        print(json.dumps({"decision": "block", "reason": "notification dismissed"}))
+        print(json.dumps({"decision": "block", "reason": "Notification dismissed"}))
         return
     # Harness-injected prompts (background task results, command echoes) are
     # not the user attending the chat: don't dismiss its banner, and don't

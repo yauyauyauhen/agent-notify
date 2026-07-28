@@ -191,7 +191,7 @@ grep -c "agent-notify/hook.py" ~/.claude/settings.json   # expect 5
 `/ok` typed in any Claude Code chat dismisses that chat's banner **without an
 LLM turn**: the hook intercepts it, removes the banner, and blocks the prompt —
 it never reaches the model, never enters context, and costs nothing. The chat
-shows a one-line "notification dismissed" notice.
+shows a one-line "Notification dismissed" notice.
 
 ```bash
 mkdir -p ~/.claude/commands
