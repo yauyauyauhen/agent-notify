@@ -187,6 +187,15 @@ MACHINE_PROMPT_MARKERS = (
 
 def on_user_prompt_submit(data):
     prompt = data.get("prompt", "")
+    # /ok — dismiss this chat's banner without an LLM turn. The slash command
+    # (commands/ok.md) expands to the sentinel; we dismiss and BLOCK the
+    # prompt, so it never reaches the model, never enters context, and costs
+    # nothing. The reason string is what Claude Code shows in the chat.
+    if "<agent-notify-dismiss>" in prompt or prompt.strip() == "/ok":
+        notifyd({"cmd": "remove",
+                 "group": chat_group(data.get("transcript_path"), data.get("session_id"))})
+        print(json.dumps({"decision": "block", "reason": "notification dismissed"}))
+        return
     # Harness-injected prompts (background task results, command echoes) are
     # not the user attending the chat: don't dismiss its banner, and don't
     # let raw markup become the next banner body.

@@ -186,7 +186,21 @@ python3 -c "import json,os; json.load(open(os.path.expanduser('~/.claude/setting
 grep -c "agent-notify/hook.py" ~/.claude/settings.json   # expect 5
 ```
 
-## 10. End-to-end test
+## 10. Install the /ok command (optional but recommended)
+
+`/ok` typed in any Claude Code chat dismisses that chat's banner **without an
+LLM turn**: the hook intercepts it, removes the banner, and blocks the prompt —
+it never reaches the model, never enters context, and costs nothing. The chat
+shows a one-line "notification dismissed" notice.
+
+```bash
+mkdir -p ~/.claude/commands
+cp ~/.agent-notify/src/commands/ok.md ~/.claude/commands/ok.md
+```
+
+**Verify:** `grep -q agent-notify-dismiss ~/.claude/commands/ok.md && echo "command OK"`
+
+## 11. End-to-end test
 
 ```bash
 python3 - <<'EOF'
@@ -213,10 +227,11 @@ EOF
 
 Your user should see an "agent-notify installed" banner appear and vanish.
 
-## 11. Tell your user
+## 12. Tell your user
 
-- **Hooks take effect in new Claude Code sessions** — currently running sessions keep their old hook config until restarted.
-- If no banner appeared in step 10: the permission from step 6 was probably not granted — check System Settings → Notifications → AgentNotify.
+- **Hooks take effect in new Claude Code sessions** — currently running sessions keep their old hook config until restarted (the `/ok` command works immediately — command files are read live).
+- Typing `/ok` in a chat dismisses its banner silently: no model call, no cost, no effect on the conversation.
+- If no banner appeared in step 11: the permission from step 6 was probably not granted — check System Settings → Notifications → AgentNotify.
 - **Optional — exact-window focus:** the first banner click shows an Accessibility permission prompt for AgentNotify. If your user grants it (System Settings → Privacy & Security → Accessibility), clicking a banner raises the specific terminal window that session lives in — including windows on other Spaces. Declining keeps app-level focus; everything else works the same. Note: macOS ties this grant to the app's code signature, so after rebuilding the daemon it may need re-granting (toggle off/on, or `tccutil reset Accessibility dev.agent-notify.app` and re-approve on next click).
 - If Claude Code also posts its own native notifications in this terminal (Ghostty, Kitty and iTerm2 do this: "Claude Code — Claude is waiting for your input"), those are a separate, unmanaged path that duplicates agent-notify. Turning notifications **off for the terminal app** in System Settings silences the duplicates without touching agent-notify — it uses its own permission, not the terminal's.
 
@@ -224,7 +239,7 @@ Your user should see an "agent-notify installed" banner appear and vanish.
 
 ```bash
 launchctl bootout gui/$UID/dev.agent-notify 2>/dev/null
-rm -f ~/Library/LaunchAgents/dev.agent-notify.plist ~/.agent-notify.sock
+rm -f ~/Library/LaunchAgents/dev.agent-notify.plist ~/.agent-notify.sock ~/.claude/commands/ok.md
 cp ~/.claude/settings.json ~/.claude/settings.json.bak-agent-notify-uninstall 2>/dev/null || true
 python3 - <<'EOF' && rm -rf ~/.agent-notify
 import json, os, tempfile

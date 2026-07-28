@@ -43,6 +43,7 @@ The ready-made hook ships in [`hooks/claude-code-hook.py`](hooks/claude-code-hoo
 - posts on `Stop` — title `chat name / worktree / repo`, body = your prompt, flattened and truncated to read as ~2 banner lines;
 - dismisses that chat's banner on `UserPromptSubmit`; shows `Notification` events' real text and suppresses idle "waiting for input" reminders;
 - keys banners by a **stable chat identity** (the uuid of the transcript's first user record), not the raw `session_id` — resuming a chat (`--resume`) mints a new session ID, and session-keyed banners would orphan on every resume;
+- ships a **`/ok` slash command** ([`commands/ok.md`](commands/ok.md)): typing it in a chat dismisses that chat's banner with **zero LLM cost** — the hook intercepts and blocks the prompt before it reaches the model, so it never enters context and the conversation is untouched;
 - handles `/clear` correctly: the chat keeps its `/rename` name but gets a new identity, so for named chats the newer banner replaces the same-titled older one, and the session lifecycle events (`SessionStart`/`SessionEnd`) dismiss banners a session leaves behind.
 
 Integrating a different agent runner? The hook is ~150 lines of dependency-free Python over the four-command protocol below — adapt away.
