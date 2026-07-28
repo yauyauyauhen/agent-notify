@@ -11,7 +11,7 @@ You run several Claude Code (or Codex, or Cursor-agent) sessions side by side, a
 agent-notify makes the notification stack itself the answer — a live list of exactly the sessions awaiting you:
 
 - **One notification banner on screen per agent session** — each finished (or input-waiting) session holds exactly one banner. The stack *is* your "sessions awaiting me" list.
-- **Self-cleaning** — a session's next notification replaces its previous one in place, and the moment you follow up in a chat, its banner disappears on its own. No duplicates, no stale pile: what's on screen is only what still needs you.
+- **Self-cleaning** — a session's next notification replaces its previous one in place, and a banner dismisses itself the moment it stops being relevant: you reply in the chat, you `/clear` it, you end the session or close its terminal window — or you type **`/ok`**, the shipped slash command that dismisses the banner right from the session without costing an LLM turn. No duplicates, no stale pile: what's on screen is only what still needs you.
 - **Easy to scan** — banners are titled `chat name / worktree / repo`, with the worktree shown only when it isn't the main checkout. Name your chats (`/rename` in Claude Code) and the stack reads like a status board.
 - **Click to jump and dismiss** — clicking a banner dismisses exactly that one and focuses your terminal. Grant the daemon Accessibility (optional, one click) and it goes further: it matches the banner's title against your terminal's window titles and raises the **specific window** that session lives in — including windows on other Spaces, via the app's Window menu. Without the grant, you get app-level focus.
 - **Reliable by architecture** — a single daemon owns every banner through one connection to macOS's notification system, using the modern `UserNotifications` API under its own app identity. The whole failure class that haunts classic CLI notifiers — banners randomly wiping each other — can't happen here (see [the bug](#the-bug-this-fixes) below).
@@ -26,7 +26,7 @@ agent-notify runs as its own tiny background app with its own notification permi
 
 > Install agent-notify by following https://github.com/yauyauyauhen/agent-notify/blob/main/install.md
 
-Your agent builds the daemon, assembles the app bundle, detects your terminal, sets up the LaunchAgent, and wires the ready-made Claude Code hook — [install.md](install.md) tells it exactly what to touch, how to verify every step, and how to uninstall. You click **Allow** once when macOS asks for notification permission. Out of the box this covers Claude Code; any other agent runner works via the four-command [protocol](#protocol).
+Your agent builds the daemon, assembles the app bundle, detects your terminal, sets up the LaunchAgent, and wires the ready-made Claude Code hook — [install.md](install.md) tells it exactly what to touch, how to verify every step, and how to uninstall. You click **Allow** once when macOS asks for notification permission. Out of the box this covers Claude Code; any other agent runner works via the five-command [protocol](#protocol).
 
 **Manual** — requires the Command Line Tools (Swift 6+ ships with them). Follow the same steps install.md gives an agent: build, assemble `AgentNotify.app` (the bundle is the daemon's notification identity — the [Info.plist template](examples/AgentNotify-Info.plist) ships in `examples/`), install the [LaunchAgent](examples/dev.agent-notify.plist), grant permission, set Alerts style. The short version:
 
@@ -46,7 +46,7 @@ The ready-made hook ships in [`hooks/claude-code-hook.py`](hooks/claude-code-hoo
 - ships a **`/ok` slash command** ([`commands/ok.md`](commands/ok.md)): typing it in a chat dismisses that chat's banner with **zero LLM cost** — the hook intercepts and blocks the prompt before it reaches the model, so it never enters context and the conversation is untouched;
 - handles `/clear` correctly: the chat keeps its `/rename` name but gets a new identity, so for named chats the newer banner replaces the same-titled older one, and the session lifecycle events (`SessionStart`/`SessionEnd`) dismiss banners a session leaves behind.
 
-Integrating a different agent runner? The hook is ~150 lines of dependency-free Python over the four-command protocol below — adapt away.
+Integrating a different agent runner? The hook is ~300 lines of dependency-free Python over the five-command protocol below — adapt away.
 
 `call()` is a ~10-line unix-socket helper; a ready-made client ships in [`client/agent-notify-client.py`](client/agent-notify-client.py):
 
