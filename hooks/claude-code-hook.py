@@ -207,6 +207,37 @@ def on_user_prompt_submit(data):
     notifyd({"cmd": "remove", "group": group})
 
 
+
+
+def claude_tty():
+    """tty of the claude process this hook serves — walk up from our parent
+    (hooks run as claude's children; an intermediate shell may sit between)."""
+    pid = os.getppid()
+    for _ in range(4):
+        try:
+            tty = subprocess.run(["ps", "-o", "tty=", "-p", str(pid)],
+                                 capture_output=True, text=True).stdout.strip()
+            if tty and tty not in ("??", "-"):
+                return tty
+            pid = int(subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)],
+                                     capture_output=True, text=True).stdout.strip())
+        except Exception:
+            return None
+    return None
+
+
+def focus_hint():
+    """Invisible window marker: the pane's tty number encoded in zero-width
+    characters. The launcher appends the same marker to the (visibly clean)
+    window title, so the daemon can raise the exact window. Encoding, mirrored
+    there: U+2060, 12 bits MSB-first as U+200B(0)/U+200C(1), U+2060."""
+    m = re.search(r"(\d+)$", claude_tty() or "")
+    if not m:
+        return ""
+    n = int(m.group(1))
+    bits = "".join("\u200c" if (n >> i) & 1 else "\u200b" for i in range(11, -1, -1))
+    return "\u2060" + bits + "\u2060"
+
 def on_stop(data):
     stored = read_prompt(data.get("session_id"))
     if stored == MACHINE_TURN_BODY:
@@ -225,6 +256,7 @@ def on_stop(data):
         # named chats: /clear keeps the name but changes the group, so the
         # newer banner replaces any same-titled older one
         "replace_same_title": chat_title(data.get("transcript_path")) is not None,
+        "focus_hint": focus_hint(),
     })
 
 
@@ -238,6 +270,7 @@ def on_notification(data):
         "title": build_title(data.get("cwd"), data.get("transcript_path")),
         "message": excerpt(message) or "Notification",
         "replace_same_title": chat_title(data.get("transcript_path")) is not None,
+        "focus_hint": focus_hint(),
     })
 
 

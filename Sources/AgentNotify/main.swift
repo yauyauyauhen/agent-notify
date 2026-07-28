@@ -11,7 +11,7 @@
 // (https://github.com/vjeantet/alerter/issues/75).
 //
 // Protocol: newline-delimited JSON over a unix stream socket.
-//   {"cmd":"post","group":G,"title":T,"message":M,"replace_same_title":B} -> {"ok":true}
+//   {"cmd":"post","group":G,"title":T,"message":M,"replace_same_title":B,"focus_hint":H} -> {"ok":true}
 //   {"cmd":"remove","group":G}       -> {"ok":true,"removed":N}
 //   {"cmd":"remove-title","title":T} -> {"ok":true,"removed":N}
 //   {"cmd":"list"}                   -> {"ok":true,"notifications":[...]}
@@ -45,7 +45,7 @@ let center = UNUserNotificationCenter.current()
 // window titles and raise the matched window before activating the app.
 // Without the Accessibility grant this quietly degrades to app-level focus.
 
-func raiseWindow(hints: [String]) -> Bool {
+func raiseWindow(exactHints: [String], hints: [String]) -> Bool {
     guard let running = NSRunningApplication
             .runningApplications(withBundleIdentifier: focusTarget).first else {
         log("raise: focus target not running")
@@ -64,7 +64,21 @@ func raiseWindow(hints: [String]) -> Bool {
         AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef)
         titles.append((window, (titleRef as? String) ?? ""))
     }
-    log("raise: hints=\(hints) windows=\(titles.map { $0.1 })")
+    log("raise: exactHints=\(exactHints.map { $0.unicodeScalars.count }) hints=\(hints) windows=\(titles.map { $0.1 })")
+    // Exact hints first: invisible zero-width window markers (a pane's tty
+    // number encoded into the title by the launcher). MUST use literal
+    // substring matching — localized comparison treats zero-width characters
+    // as ignorable, so a zero-width-only needle would "match" every title.
+    for hint in exactHints where !hint.isEmpty {
+        for (window, title) in titles where !title.isEmpty {
+            if title.contains(hint) {
+                AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+                AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+                log("raise: matched '\(title)' via exact marker")
+                return true
+            }
+        }
+    }
     for hint in hints where !hint.isEmpty {
         for (window, title) in titles where !title.isEmpty {
             if title.localizedCaseInsensitiveContains(hint) {
@@ -78,14 +92,14 @@ func raiseWindow(hints: [String]) -> Bool {
     // Cross-Space path: AX window enumeration only sees the CURRENT Space,
     // but the app's Window menu lists every window on every Space, and
     // pressing a window's menu item focuses it including the Space switch.
-    if pressWindowMenuItem(hints: hints, appAX: ax) {
+    if pressWindowMenuItem(exactHints: exactHints, hints: hints, appAX: ax) {
         return true
     }
     log("raise: no window matched")
     return false
 }
 
-func pressWindowMenuItem(hints: [String], appAX: AXUIElement) -> Bool {
+func pressWindowMenuItem(exactHints: [String], hints: [String], appAX: AXUIElement) -> Bool {
     var menubarRef: CFTypeRef?
     guard AXUIElementCopyAttributeValue(appAX, kAXMenuBarAttribute as CFString, &menubarRef) == .success,
           CFGetTypeID(menubarRef!) == AXUIElementGetTypeID() else { return false }
@@ -103,6 +117,20 @@ func pressWindowMenuItem(hints: [String], appAX: AXUIElement) -> Bool {
         var itemsRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(itemsMenu, kAXChildrenAttribute as CFString, &itemsRef) == .success,
               let items = itemsRef as? [AXUIElement] else { return false }
+        // Exact zero-width markers first — literal matching, same reasoning
+        // as in raiseWindow.
+        for hint in exactHints where !hint.isEmpty {
+            for item in items {
+                var itemTitleRef: CFTypeRef?
+                AXUIElementCopyAttributeValue(item, kAXTitleAttribute as CFString, &itemTitleRef)
+                guard let itemTitle = itemTitleRef as? String, !itemTitle.isEmpty else { continue }
+                if itemTitle.contains(hint) {
+                    AXUIElementPerformAction(item, kAXPressAction as CFString)
+                    log("raise: pressed Window-menu item '\(itemTitle)' via exact marker")
+                    return true
+                }
+            }
+        }
         for hint in hints where !hint.isEmpty {
             for item in items {
                 var itemTitleRef: CFTypeRef?
@@ -147,11 +175,13 @@ final class Delegate: NSObject, UNUserNotificationCenterDelegate {
         if response.actionIdentifier == UNNotificationDefaultActionIdentifier {
             let id = response.notification.request.identifier
             let bannerTitle = response.notification.request.content.title
+            let focusHint = response.notification.request.content.userInfo["focusHint"] as? String ?? ""
             center.removeDeliveredNotifications(withIdentifiers: [id])
             DispatchQueue.main.async {
                 let prompt = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
                 if AXIsProcessTrustedWithOptions(prompt as CFDictionary) {
-                    _ = raiseWindow(hints: bannerTitle.components(separatedBy: " / "))
+                    _ = raiseWindow(exactHints: [focusHint],
+                                    hints: bannerTitle.components(separatedBy: " / "))
                 } else {
                     log("accessibility not granted — window targeting skipped")
                 }
@@ -234,7 +264,7 @@ func removeTitle(_ title: String) -> Int {
     return ids.count
 }
 
-func post(group: String, title: String, message: String, replaceSameTitle: Bool) {
+func post(group: String, title: String, message: String, replaceSameTitle: Bool, focusHint: String?) {
     // replace_same_title serves renamed-but-regrouped sessions (Claude Code's
     // /clear keeps a chat's name but changes its history anchor): the newer
     // banner replaces any same-titled older one. Clients set it only for
@@ -249,7 +279,11 @@ func post(group: String, title: String, message: String, replaceSameTitle: Bool)
     let content = UNMutableNotificationContent()
     content.title = title
     content.body = message
-    content.userInfo = ["groupID": group]
+    var info: [String: Any] = ["groupID": group]
+    // Optional invisible window marker (see raiseWindow) — rides along so a
+    // click can find the exact window even when visible titles are ambiguous.
+    if let focusHint, !focusHint.isEmpty { info["focusHint"] = focusHint }
+    content.userInfo = info
     // Fixed identifier per session: adding with an existing identifier
     // replaces the previous banner in place, atomically.
     let request = UNNotificationRequest(identifier: group, content: content, trigger: nil)
@@ -287,7 +321,8 @@ func handle(_ request: [String: Any]) -> [String: Any] {
             return ["ok": false, "error": "post needs group/title/message"]
         }
         post(group: group, title: title, message: message,
-             replaceSameTitle: request["replace_same_title"] as? Bool ?? false)
+             replaceSameTitle: request["replace_same_title"] as? Bool ?? false,
+             focusHint: request["focus_hint"] as? String)
         return ["ok": true]
     case "remove":
         guard let group = request["group"] as? String else {

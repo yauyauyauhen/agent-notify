@@ -79,6 +79,11 @@ Newline-delimited JSON over the unix socket. One request, one reply, per connect
 // -> {"ok":true}    (replaces any previous banner with the same group, in place)
 // optional: "replace_same_title":true also replaces same-titled banners from
 // other groups — for sessions that keep their name but change identity
+// optional: "focus_hint":"<string>" — matched literally against window titles
+// on click, before the title-part heuristics. The shipped hook sends the
+// session's tty number encoded in zero-width characters, and the launcher can
+// append the same invisible marker to the window title: exact window
+// targeting with visibly clean titles
 
 {"cmd":"remove","group":"my-session"}
 // -> {"ok":true,"removed":1}
