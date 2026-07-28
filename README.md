@@ -14,7 +14,7 @@ agent-notify makes the notification stack itself the answer — a live list of e
 - **Self-cleaning** — a session's next notification replaces its previous one in place, and a banner dismisses itself the moment it stops being relevant: you reply in the chat, you `/clear` it, you end the session or close its terminal window — or you type **`/ok`**, the shipped slash command that dismisses the banner right from the session without costing an LLM turn. No duplicates, no stale pile: what's on screen is only what still needs you.
 - **Easy to scan** — banners are titled `chat name / worktree / repo`, with the worktree shown only when it isn't the main checkout. Name your chats (`/rename` in Claude Code) and the stack reads like a status board.
 - **Click to jump and dismiss** — clicking a banner dismisses exactly that one and focuses your terminal. Grant the daemon Accessibility (optional, one click) and it goes further: it matches the banner's title against your terminal's window titles and raises the **specific window** that session lives in — including windows on other Spaces, via the app's Window menu. Without the grant, you get app-level focus.
-- **Reliable by architecture** — a single daemon owns every banner through one connection to macOS's notification system, using the modern `UserNotifications` API under its own app identity. The whole failure class that haunts classic CLI notifiers — banners randomly wiping each other — can't happen here (see [the bug](#the-bug-this-fixes) below).
+- **Reliable by architecture** — a single daemon owns every banner through one connection to macOS's notification system, using the modern `UserNotifications` API under its own app identity. The whole failure class that haunts classic CLI notifiers — banners randomly wiping each other — can't happen here (see [why](#why-not-alerter-or-terminal-notifier) below).
 
 agent-notify runs as its own tiny background app with its own notification permission — it doesn't impersonate or depend on your terminal. Clicking a banner focuses whichever terminal you configure: we run it with **Ghostty**, and it works the same with iTerm2, Cursor, Terminal.app, Kitty, or anything else with a bundle id. Banners can even wear your terminal's icon — drop its `.icns` into the app bundle (one optional install step).
 
@@ -84,15 +84,15 @@ Newline-delimited JSON over the unix socket. One request, one reply, per connect
 
 `list` is ground truth: the daemon owns every banner it posted, so what it enumerates is what's on screen.
 
-## The bug this fixes
+## Why not alerter or terminal-notifier?
 
-Classic CLI notifiers (alerter, terminal-notifier) impersonate your terminal's bundle ID over the legacy `NSUserNotification` API and keep one process alive per banner. That design has two fatal problems:
+The classic CLI notifiers impersonate your terminal's bundle ID over the deprecated `NSUserNotification` API and keep one process alive per banner. Building an attention queue on top of them fails in two ways — both discovered the hard way while building this tool:
 
 **The race.** Run several notifier processes in parallel and every one claims the *same* app identity inside macOS's notification daemon — sharing one delivered-notifications list, one delegate slot for click routing, and per-connection bookkeeping. When any process exits while its banner is still registered, the cleanup sometimes sweeps *sibling* banners along with it. In practice that looks haunted: clicking one notification dismisses several; a new notification from one session silently kills another session's banner; the same setup works for days, then wipes your stack twice in an hour. No flag can fix it, because the sharing itself is the bug. Full write-up in [vjeantet/alerter#75](https://github.com/vjeantet/alerter/issues/75).
 
 **The wall.** Impersonation only ever worked for app identities that never touch the notification system themselves. The moment your terminal is a *real* notification client — Ghostty, for instance, registers with the modern `UserNotifications` API — macOS hard-rejects every legacy connection claiming its identity: `Legacy client connecting to modern client. You can't mix modern clients with legacy clients`, straight from `usernoted`. Deliveries are silently denied with no error surfaced to the caller. The trick isn't just racy; for modern terminals it's impossible.
 
-agent-notify v1 was a single supervisor daemon that fixed the race while still impersonating. v2 removes the impersonation too: the daemon is a real (tiny) app with its own identity on the modern API — first-class in-place replacement, reliable removal and enumeration, proper click routing. Both failure modes are gone by construction, not by care.
+agent-notify is built where those problems can't exist: one long-lived daemon, its own app identity, the modern API — first-class in-place replacement, reliable removal and enumeration, proper click routing. (Historical footnote: v1 of this project fixed the race while still impersonating; the wall is what killed impersonation for good.)
 
 ## Caveats
 
