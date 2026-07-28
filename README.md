@@ -8,15 +8,27 @@ You run several Claude Code (or Codex, or Cursor-agent) sessions side by side, a
 
 ## The solution
 
-agent-notify makes the notification stack itself the answer — a live list of exactly the sessions awaiting you:
+agent-notify makes the notification stack itself the answer: a live list of exactly the sessions awaiting you.
 
-- **One notification banner on screen per agent session** — each finished (or input-waiting) session holds exactly one banner. The stack *is* your "sessions awaiting me" list.
-- **Self-cleaning** — a session's next notification replaces its previous one in place, and a banner dismisses itself the moment it stops being relevant: you reply in the chat, you `/clear` it, you end the session or close its terminal window — or you type **`/ok`**, the shipped slash command that dismisses the banner right from the session without costing an LLM turn. No duplicates, no stale pile: what's on screen is only what still needs you.
-- **Easy to scan** — banners are titled `chat name / worktree / repo`, with the worktree shown only when it isn't the main checkout. Name your chats (`/rename` in Claude Code) and the stack reads like a status board.
-- **Click to jump and dismiss** — clicking a banner dismisses exactly that one and focuses your terminal. Grant the daemon Accessibility (optional, one click) and it goes further: it matches the banner's title against your terminal's window titles and raises the **specific window** that session lives in — including windows on other Spaces, via the app's Window menu. Without the grant, you get app-level focus.
-- **Reliable by architecture** — a single daemon owns every banner through one connection to macOS's notification system, using the modern `UserNotifications` API under its own app identity. The whole failure class that haunts classic CLI notifiers — banners randomly wiping each other — can't happen here (see [why](#why-not-alerter-or-terminal-notifier) below).
+- **One banner per agent session**
+  - each finished or input-waiting session holds exactly one banner
+  - the stack on your screen *is* your "sessions awaiting me" list
+- **Self-cleaning**
+  - a session's next notification replaces its previous one in place
+  - a banner dismisses itself the moment it stops being relevant: you reply in the chat, `/clear` it, `/exit` the session, or close its terminal window
+  - merely clicking into the session's chat never dismisses its banner: only your deliberate reaction does, not a stray click or an accidental read
+  - dismiss right from the session chat with **`/ok`**, the shipped slash command that clears the banner without costing an LLM turn
+- **Easy to scan**
+  - banners are titled `chat name / worktree / repo`, with the worktree shown only when it isn't the main checkout
+  - name your chats (`/rename` in Claude Code) and the stack reads like a status board
+- **Click to jump and dismiss**
+  - clicking a banner dismisses exactly that one and focuses your terminal
+  - clicking can raise the specific window the session lives in, including windows on other Spaces: grant the daemon Accessibility (optional, one click); without the grant, you get app-level focus
+- **Reliable notification handling**
+  - banners never randomly wipe each other, the failure class that haunts classic CLI notifiers
+  - it can't happen here by construction: a single daemon owns every banner through one connection to macOS's notification system, using the modern `UserNotifications` API under its own app identity (see [why](#why-not-alerter-or-terminal-notifier) below)
 
-agent-notify runs as its own tiny background app with its own notification permission — it doesn't impersonate or depend on your terminal. Clicking a banner focuses whichever terminal you configure: we run it with **Ghostty**, and it works the same with iTerm2, Cursor, Terminal.app, Kitty, or anything else with a bundle id. Banners can even wear your terminal's icon — drop its `.icns` into the app bundle (one optional install step).
+agent-notify runs as its own tiny background app with its own notification permission — it doesn't impersonate or depend on your terminal. Clicking a banner focuses whichever terminal you configure: I run it with **Ghostty**, and it works the same with iTerm2, Cursor, Terminal.app, Kitty, or anything else with a bundle id. Banners can wear your terminal's icon — drop its `.icns` into the app bundle (one optional install step).
 
 **Tip:** to see every session's banner at a glance instead of a collapsed pile, set notification grouping to **Off** for AgentNotify in macOS notification settings — and use the **Alerts** style so banners persist until handled.
 
