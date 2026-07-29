@@ -69,9 +69,12 @@ func raiseWindow(exactHints: [String], hints: [String]) -> Bool {
     // number encoded into the title by the launcher). MUST use literal
     // substring matching — localized comparison treats zero-width characters
     // as ignorable, so a zero-width-only needle would "match" every title.
+    // .literal: code-unit-exact search. Default String.contains compares
+    // grapheme clusters, and zero-width characters cluster with neighboring
+    // letters — the marker would intermittently fail to match its own window.
     for hint in exactHints where !hint.isEmpty {
         for (window, title) in titles where !title.isEmpty {
-            if title.contains(hint) {
+            if title.range(of: hint, options: .literal) != nil {
                 AXUIElementPerformAction(window, kAXRaiseAction as CFString)
                 AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
                 log("raise: matched '\(title)' via exact marker")
@@ -79,14 +82,20 @@ func raiseWindow(exactHints: [String], hints: [String]) -> Bool {
             }
         }
     }
+    // Fuzzy title matching raises ONLY on a unique match: with several
+    // same-named windows (folder-only titles), "first match wins" is a coin
+    // flip that jumps to the wrong twin — worse than the app-level fallback.
     for hint in hints where !hint.isEmpty {
-        for (window, title) in titles where !title.isEmpty {
-            if title.localizedCaseInsensitiveContains(hint) {
-                AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-                AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
-                log("raise: matched '\(title)' via hint '\(hint)'")
-                return true
-            }
+        let candidates = titles.filter { !$0.1.isEmpty && $0.1.localizedCaseInsensitiveContains(hint) }
+        if candidates.count == 1 {
+            let (window, title) = candidates[0]
+            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+            AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+            log("raise: matched '\(title)' via hint '\(hint)'")
+            return true
+        }
+        if candidates.count > 1 {
+            log("raise: hint '\(hint)' ambiguous across \(candidates.count) windows — not guessing")
         }
     }
     // Cross-Space path: AX window enumeration only sees the CURRENT Space,
@@ -124,23 +133,29 @@ func pressWindowMenuItem(exactHints: [String], hints: [String], appAX: AXUIEleme
                 var itemTitleRef: CFTypeRef?
                 AXUIElementCopyAttributeValue(item, kAXTitleAttribute as CFString, &itemTitleRef)
                 guard let itemTitle = itemTitleRef as? String, !itemTitle.isEmpty else { continue }
-                if itemTitle.contains(hint) {
+                if itemTitle.range(of: hint, options: .literal) != nil {
                     AXUIElementPerformAction(item, kAXPressAction as CFString)
                     log("raise: pressed Window-menu item '\(itemTitle)' via exact marker")
                     return true
                 }
             }
         }
+        var itemTitles: [(AXUIElement, String)] = []
+        for item in items {
+            var itemTitleRef: CFTypeRef?
+            AXUIElementCopyAttributeValue(item, kAXTitleAttribute as CFString, &itemTitleRef)
+            if let t = itemTitleRef as? String, !t.isEmpty { itemTitles.append((item, t)) }
+        }
         for hint in hints where !hint.isEmpty {
-            for item in items {
-                var itemTitleRef: CFTypeRef?
-                AXUIElementCopyAttributeValue(item, kAXTitleAttribute as CFString, &itemTitleRef)
-                guard let itemTitle = itemTitleRef as? String, !itemTitle.isEmpty else { continue }
-                if itemTitle.localizedCaseInsensitiveContains(hint) {
-                    AXUIElementPerformAction(item, kAXPressAction as CFString)
-                    log("raise: pressed Window-menu item '\(itemTitle)' via hint '\(hint)'")
-                    return true
-                }
+            let candidates = itemTitles.filter { $0.1.localizedCaseInsensitiveContains(hint) }
+            if candidates.count == 1 {
+                let (item, itemTitle) = candidates[0]
+                AXUIElementPerformAction(item, kAXPressAction as CFString)
+                log("raise: pressed Window-menu item '\(itemTitle)' via hint '\(hint)'")
+                return true
+            }
+            if candidates.count > 1 {
+                log("raise: menu hint '\(hint)' ambiguous across \(candidates.count) items — not guessing")
             }
         }
         log("raise: no Window-menu match")
