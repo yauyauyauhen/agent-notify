@@ -295,40 +295,64 @@ func walkSplits(_ el: AXUIElement, _ path: String, _ visit: (String, String) -> 
 
 func seatSample() {
     // Ghostty strips zero-width characters from AX *text* (verified: on-screen
-    // markers read back as zw=0) but preserves them in window TITLES. So we
-    // sample the FOCUSED split: climb from the app's focused element to its
-    // window collecting the L/R path, and decode the tty marker from the
-    // window title (which shows the focused split's title). Every pane the
-    // user ever focuses gets its slot recorded over time.
+    // markers read back as zw=0) but preserves them in window TITLES. A window
+    // title shows only its FOCUSED split's title, so two passes:
+    //  1. every window's title -> its marker's slot. Single-split windows are
+    //     recorded continuously regardless of app focus; multi-split windows
+    //     record whichever split is currently focused within them.
+    //  2. the app's focused element -> its exact L/R split path, refining the
+    //     one currently-focused pane's slot.
     guard AXIsProcessTrusted(),
           let running = NSRunningApplication.runningApplications(withBundleIdentifier: focusTarget).first else { return }
     let ax = AXUIElementCreateApplication(running.processIdentifier)
-    var focRef: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(ax, kAXFocusedUIElementAttribute as CFString, &focRef) == .success,
-          let fv = focRef, CFGetTypeID(fv) == AXUIElementGetTypeID() else { return }
-    var el = fv as! AXUIElement
-    var path = ""
-    var win: AXUIElement? = nil
-    for _ in 0..<12 {
-        var roleRef: CFTypeRef?; AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleRef)
-        if (roleRef as? String) == "AXWindow" { win = el; break }
-        var descRef: CFTypeRef?; AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &descRef)
-        switch descRef as? String {
-        case "Left pane": path = path.isEmpty ? "L" : "L." + path
-        case "Right pane": path = path.isEmpty ? "R" : "R." + path
-        default: break
-        }
-        var parRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(el, kAXParentAttribute as CFString, &parRef) == .success,
-              let pv = parRef, CFGetTypeID(pv) == AXUIElementGetTypeID() else { break }
-        el = pv as! AXUIElement
-    }
-    guard let w = win, let f = windowFrame(w) else { return }
-    var tRef: CFTypeRef?; AXUIElementCopyAttributeValue(w, kAXTitleAttribute as CFString, &tRef)
-    guard let title = tRef as? String, let n = decodeTtyMarker(title) else { return }
     let now = Int(Date().timeIntervalSince1970)
-    seatingMap["\(n)"] = ["x": f.0, "y": f.1, "w": f.2, "h": f.3, "seen": now, "p": pathCode(path)]
-    if let data = try? JSONSerialization.data(withJSONObject: seatingMap) {
+    var dirty = false
+
+    var winsRef: CFTypeRef?
+    if AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute as CFString, &winsRef) == .success,
+       let windows = winsRef as? [AXUIElement] {
+        for w in windows {
+            var tRef: CFTypeRef?; AXUIElementCopyAttributeValue(w, kAXTitleAttribute as CFString, &tRef)
+            guard let title = tRef as? String, let n = decodeTtyMarker(title),
+                  let f = windowFrame(w) else { continue }
+            // Pass 1 can't know the split path (title is path-agnostic); keep any
+            // path already learned for this tty, else default to 0 (whole window).
+            let prevPath = seatingMap["\(n)"]?["p"] ?? 0
+            seatingMap["\(n)"] = ["x": f.0, "y": f.1, "w": f.2, "h": f.3, "seen": now, "p": prevPath]
+            dirty = true
+        }
+    }
+
+    var focRef: CFTypeRef?
+    if AXUIElementCopyAttributeValue(ax, kAXFocusedUIElementAttribute as CFString, &focRef) == .success,
+       let fv = focRef, CFGetTypeID(fv) == AXUIElementGetTypeID() {
+        var el = fv as! AXUIElement
+        var path = ""
+        var win: AXUIElement? = nil
+        for _ in 0..<12 {
+            var roleRef: CFTypeRef?; AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleRef)
+            if (roleRef as? String) == "AXWindow" { win = el; break }
+            var descRef: CFTypeRef?; AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &descRef)
+            switch descRef as? String {
+            case "Left pane": path = path.isEmpty ? "L" : "L." + path
+            case "Right pane": path = path.isEmpty ? "R" : "R." + path
+            default: break
+            }
+            var parRef: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(el, kAXParentAttribute as CFString, &parRef) == .success,
+                  let pv = parRef, CFGetTypeID(pv) == AXUIElementGetTypeID() else { break }
+            el = pv as! AXUIElement
+        }
+        if let w = win, let f = windowFrame(w) {
+            var tRef: CFTypeRef?; AXUIElementCopyAttributeValue(w, kAXTitleAttribute as CFString, &tRef)
+            if let title = tRef as? String, let n = decodeTtyMarker(title) {
+                seatingMap["\(n)"] = ["x": f.0, "y": f.1, "w": f.2, "h": f.3, "seen": now, "p": pathCode(path)]
+                dirty = true
+            }
+        }
+    }
+
+    if dirty, let data = try? JSONSerialization.data(withJSONObject: seatingMap) {
         try? data.write(to: URL(fileURLWithPath: seatingPath))
     }
 }
