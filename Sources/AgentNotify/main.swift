@@ -317,8 +317,9 @@ func seatSample() {
                   let f = windowFrame(w) else { continue }
             // Pass 1 can't know the split path (title is path-agnostic); keep any
             // path already learned for this tty, else default to 0 (whole window).
-            let prevPath = seatingMap["\(n)"]?["p"] ?? 0
-            seatingMap["\(n)"] = ["x": f.0, "y": f.1, "w": f.2, "h": f.3, "seen": now, "p": prevPath]
+            let key = "\(running.processIdentifier):\(n)"
+            let prevPath = seatingMap[key]?["p"] ?? 0
+            seatingMap[key] = ["x": f.0, "y": f.1, "w": f.2, "h": f.3, "seen": now, "p": prevPath]
             dirty = true
         }
     }
@@ -346,7 +347,7 @@ func seatSample() {
         if let w = win, let f = windowFrame(w) {
             var tRef: CFTypeRef?; AXUIElementCopyAttributeValue(w, kAXTitleAttribute as CFString, &tRef)
             if let title = tRef as? String, let n = decodeTtyMarker(title) {
-                seatingMap["\(n)"] = ["x": f.0, "y": f.1, "w": f.2, "h": f.3, "seen": now, "p": pathCode(path)]
+                seatingMap["\(running.processIdentifier):\(n)"] = ["x": f.0, "y": f.1, "w": f.2, "h": f.3, "seen": now, "p": pathCode(path)]
                 dirty = true
             }
         }
@@ -367,7 +368,9 @@ func pathCode(_ path: String) -> Int {
 
 if let data = try? Data(contentsOf: URL(fileURLWithPath: seatingPath)),
    let saved = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Int]] {
-    seatingMap = saved
+    // epoch-keyed entries only ("<terminal-pid>:<tty>"); legacy plain-tty
+    // keys predate epochs and cannot be trusted across relaunches.
+    seatingMap = saved.filter { $0.key.contains(":") }
 }
 let seatTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
 seatTimer.schedule(deadline: .now() + 10, repeating: 20)
