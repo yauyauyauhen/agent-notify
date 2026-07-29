@@ -82,33 +82,26 @@ func raiseWindow(exactHints: [String], hints: [String]) -> Bool {
             }
         }
     }
-    // Fuzzy title matching raises ONLY on a unique match: with several
-    // same-named windows (folder-only titles), "first match wins" is a coin
-    // flip that jumps to the wrong twin — worse than the app-level fallback.
-    for hint in hints where !hint.isEmpty {
-        let candidates = titles.filter { !$0.1.isEmpty && $0.1.localizedCaseInsensitiveContains(hint) }
-        if candidates.count == 1 {
-            let (window, title) = candidates[0]
-            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-            AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
-            log("raise: matched '\(title)' via hint '\(hint)'")
-            return true
-        }
-        if candidates.count > 1 {
-            log("raise: hint '\(hint)' ambiguous across \(candidates.count) windows — not guessing")
-        }
+    // All EXACT attempts must run before any fuzzy guessing: the AX list
+    // above only covers the current Space, but the app's Window menu lists
+    // every window on every Space — a banner whose window sits on another
+    // Space is exactly findable there by its marker, and a premature fuzzy
+    // hit on a same-named twin here would steal the click (observed live).
+    if pressWindowMenuItem(hints: exactHints, exact: true, appAX: ax) {
+        return true
     }
-    // Cross-Space path: AX window enumeration only sees the CURRENT Space,
-    // but the app's Window menu lists every window on every Space, and
-    // pressing a window's menu item focuses it including the Space switch.
-    if pressWindowMenuItem(exactHints: exactHints, hints: hints, appAX: ax) {
+    // Fuzzy fallback, via the Window menu so uniqueness is judged GLOBALLY:
+    // "unique on the current Space" can still be the wrong twin when its
+    // namesake lives on another Space. Only an app-wide unique title match
+    // is safe to raise; anything ambiguous degrades to app-level focus.
+    if pressWindowMenuItem(hints: hints, exact: false, appAX: ax) {
         return true
     }
     log("raise: no window matched")
     return false
 }
 
-func pressWindowMenuItem(exactHints: [String], hints: [String], appAX: AXUIElement) -> Bool {
+func pressWindowMenuItem(hints: [String], exact: Bool, appAX: AXUIElement) -> Bool {
     var menubarRef: CFTypeRef?
     guard AXUIElementCopyAttributeValue(appAX, kAXMenuBarAttribute as CFString, &menubarRef) == .success,
           CFGetTypeID(menubarRef!) == AXUIElementGetTypeID() else { return false }
@@ -126,20 +119,6 @@ func pressWindowMenuItem(exactHints: [String], hints: [String], appAX: AXUIEleme
         var itemsRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(itemsMenu, kAXChildrenAttribute as CFString, &itemsRef) == .success,
               let items = itemsRef as? [AXUIElement] else { return false }
-        // Exact zero-width markers first — literal matching, same reasoning
-        // as in raiseWindow.
-        for hint in exactHints where !hint.isEmpty {
-            for item in items {
-                var itemTitleRef: CFTypeRef?
-                AXUIElementCopyAttributeValue(item, kAXTitleAttribute as CFString, &itemTitleRef)
-                guard let itemTitle = itemTitleRef as? String, !itemTitle.isEmpty else { continue }
-                if itemTitle.range(of: hint, options: .literal) != nil {
-                    AXUIElementPerformAction(item, kAXPressAction as CFString)
-                    log("raise: pressed Window-menu item '\(itemTitle)' via exact marker")
-                    return true
-                }
-            }
-        }
         var itemTitles: [(AXUIElement, String)] = []
         for item in items {
             var itemTitleRef: CFTypeRef?
@@ -147,15 +126,29 @@ func pressWindowMenuItem(exactHints: [String], hints: [String], appAX: AXUIEleme
             if let t = itemTitleRef as? String, !t.isEmpty { itemTitles.append((item, t)) }
         }
         for hint in hints where !hint.isEmpty {
-            let candidates = itemTitles.filter { $0.1.localizedCaseInsensitiveContains(hint) }
-            if candidates.count == 1 {
-                let (item, itemTitle) = candidates[0]
-                AXUIElementPerformAction(item, kAXPressAction as CFString)
-                log("raise: pressed Window-menu item '\(itemTitle)' via hint '\(hint)'")
-                return true
-            }
-            if candidates.count > 1 {
-                log("raise: menu hint '\(hint)' ambiguous across \(candidates.count) items — not guessing")
+            if exact {
+                // Zero-width markers: literal code-unit matching (see
+                // raiseWindow); markers are unique by construction, so the
+                // first hit is THE window.
+                for (item, itemTitle) in itemTitles {
+                    if itemTitle.range(of: hint, options: .literal) != nil {
+                        AXUIElementPerformAction(item, kAXPressAction as CFString)
+                        log("raise: pressed Window-menu item '\(itemTitle)' via exact marker")
+                        return true
+                    }
+                }
+            } else {
+                // Fuzzy: raise only on an app-wide UNIQUE title match.
+                let candidates = itemTitles.filter { $0.1.localizedCaseInsensitiveContains(hint) }
+                if candidates.count == 1 {
+                    let (item, itemTitle) = candidates[0]
+                    AXUIElementPerformAction(item, kAXPressAction as CFString)
+                    log("raise: pressed Window-menu item '\(itemTitle)' via hint '\(hint)'")
+                    return true
+                }
+                if candidates.count > 1 {
+                    log("raise: menu hint '\(hint)' ambiguous across \(candidates.count) items — not guessing")
+                }
             }
         }
         log("raise: no Window-menu match")
