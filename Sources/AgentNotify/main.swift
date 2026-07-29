@@ -394,8 +394,7 @@ func handle(_ request: [String: Any]) -> [String: Any] {
                 if AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &v) == .success,
                    let text = v as? String {
                     let zw = text.unicodeScalars.filter { [0x200b, 0x200c, 0x2060].contains($0.value) }.count
-                    let marker = decodeTtyMarker(text).map { " marker=\($0)" } ?? ""
-                    extra = " value=\(text.count)ch zw=\(zw)\(marker) '\(String(text.prefix(30)).replacingOccurrences(of: "\n", with: "\\n"))'"
+                    extra = " value=\(text.count)ch zw=\(zw) '\(String(text.prefix(30)).replacingOccurrences(of: "\n", with: "\\n"))'"
                 } else {
                     extra = " value=unreadable"
                 }
