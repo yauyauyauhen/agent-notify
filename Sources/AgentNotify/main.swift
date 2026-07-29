@@ -225,6 +225,131 @@ final class Delegate: NSObject, UNUserNotificationCenterDelegate {
     }
 }
 
+// MARK: - Seating map (exact session restore)
+// Terminal panes carry an invisible zero-width tty marker in their on-screen
+// text (the Claude statusline emits it; window titles carry the same code).
+// A periodic sampler walks every split's AXTextArea, decodes the marker, and
+// records tty -> (window frame + split path). After a terminal relaunch the
+// restoring pane prints a nonce marker, asks `seat-locate` where it appears,
+// and matches that slot against this table to find EXACTLY the session that
+// lived there. The table persists across daemon restarts.
+
+let seatingPath = NSString(string: "~/.claude-profiles/seating.json").expandingTildeInPath
+var seatingMap: [String: [String: Int]] = [:]
+
+func decodeTtyMarker(_ text: String) -> Int? {
+    // last occurrence of U+2060 [12 x U+200B/U+200C, MSB first] U+2060
+    let s = Array(text.unicodeScalars)
+    var i = s.count - 1
+    while i >= 13 {
+        if s[i].value == 0x2060 && s[i - 13].value == 0x2060 {
+            var n = 0, ok = true
+            for k in 1...12 {
+                switch s[i - 13 + k].value {
+                case 0x200C: n = (n << 1) | 1
+                case 0x200B: n = n << 1
+                default: ok = false
+                }
+                if !ok { break }
+            }
+            if ok { return n }
+        }
+        i -= 1
+    }
+    return nil
+}
+
+func windowFrame(_ w: AXUIElement) -> (Int, Int, Int, Int)? {
+    var posRef: CFTypeRef?; var sizeRef: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(w, kAXPositionAttribute as CFString, &posRef) == .success,
+          AXUIElementCopyAttributeValue(w, kAXSizeAttribute as CFString, &sizeRef) == .success,
+          let posVal = posRef, let sizeVal = sizeRef,
+          CFGetTypeID(posVal) == AXValueGetTypeID(), CFGetTypeID(sizeVal) == AXValueGetTypeID() else { return nil }
+    var p = CGPoint.zero; var sz = CGSize.zero
+    AXValueGetValue(posVal as! AXValue, .cgPoint, &p)
+    AXValueGetValue(sizeVal as! AXValue, .cgSize, &sz)
+    return (Int(p.x), Int(p.y), Int(sz.width), Int(sz.height))
+}
+
+// Visit every split leaf (AXTextArea) with its L/R nesting path.
+func walkSplits(_ el: AXUIElement, _ path: String, _ visit: (String, String) -> Void) {
+    var roleRef: CFTypeRef?; AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleRef)
+    if (roleRef as? String) == "AXTextArea" {
+        var v: CFTypeRef?
+        if AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &v) == .success,
+           let t = v as? String { visit(path, t) }
+        return
+    }
+    var descRef: CFTypeRef?; AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &descRef)
+    var seg = ""
+    switch descRef as? String {
+    case "Left pane": seg = "L"
+    case "Right pane": seg = "R"
+    default: break
+    }
+    var chRef: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &chRef) == .success,
+          let ch = chRef as? [AXUIElement] else { return }
+    for c in ch { walkSplits(c, seg.isEmpty ? path : path + "." + seg, visit) }
+}
+
+func seatSample() {
+    // Ghostty strips zero-width characters from AX *text* (verified: on-screen
+    // markers read back as zw=0) but preserves them in window TITLES. So we
+    // sample the FOCUSED split: climb from the app's focused element to its
+    // window collecting the L/R path, and decode the tty marker from the
+    // window title (which shows the focused split's title). Every pane the
+    // user ever focuses gets its slot recorded over time.
+    guard AXIsProcessTrusted(),
+          let running = NSRunningApplication.runningApplications(withBundleIdentifier: focusTarget).first else { return }
+    let ax = AXUIElementCreateApplication(running.processIdentifier)
+    var focRef: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(ax, kAXFocusedUIElementAttribute as CFString, &focRef) == .success,
+          let fv = focRef, CFGetTypeID(fv) == AXUIElementGetTypeID() else { return }
+    var el = fv as! AXUIElement
+    var path = ""
+    var win: AXUIElement? = nil
+    for _ in 0..<12 {
+        var roleRef: CFTypeRef?; AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleRef)
+        if (roleRef as? String) == "AXWindow" { win = el; break }
+        var descRef: CFTypeRef?; AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &descRef)
+        switch descRef as? String {
+        case "Left pane": path = path.isEmpty ? "L" : "L." + path
+        case "Right pane": path = path.isEmpty ? "R" : "R." + path
+        default: break
+        }
+        var parRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, kAXParentAttribute as CFString, &parRef) == .success,
+              let pv = parRef, CFGetTypeID(pv) == AXUIElementGetTypeID() else { break }
+        el = pv as! AXUIElement
+    }
+    guard let w = win, let f = windowFrame(w) else { return }
+    var tRef: CFTypeRef?; AXUIElementCopyAttributeValue(w, kAXTitleAttribute as CFString, &tRef)
+    guard let title = tRef as? String, let n = decodeTtyMarker(title) else { return }
+    let now = Int(Date().timeIntervalSince1970)
+    seatingMap["\(n)"] = ["x": f.0, "y": f.1, "w": f.2, "h": f.3, "seen": now, "p": pathCode(path)]
+    if let data = try? JSONSerialization.data(withJSONObject: seatingMap) {
+        try? data.write(to: URL(fileURLWithPath: seatingPath))
+    }
+}
+
+// Paths are short strings like "R.L.R" — encode as an int so the map stays
+// [String: Int]-typed (L=1, R=2, base-3 digits).
+func pathCode(_ path: String) -> Int {
+    var n = 0
+    for c in path where c == "L" || c == "R" { n = n * 3 + (c == "L" ? 1 : 2) }
+    return n
+}
+
+if let data = try? Data(contentsOf: URL(fileURLWithPath: seatingPath)),
+   let saved = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Int]] {
+    seatingMap = saved
+}
+let seatTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
+seatTimer.schedule(deadline: .now() + 10, repeating: 20)
+seatTimer.setEventHandler { seatSample() }
+seatTimer.resume()
+
 let delegate = Delegate()
 center.delegate = delegate
 
@@ -366,6 +491,139 @@ func handle(_ request: [String: Any]) -> [String: Any] {
             return (titleRef as? String) ?? "<untitled>"
         }
         return ["ok": true, "windows": titles]
+    case "seat-debug":
+        // Step-by-step trace of exactly what the sampler sees.
+        guard AXIsProcessTrusted(),
+              let running = NSRunningApplication.runningApplications(withBundleIdentifier: focusTarget).first else {
+            return ["ok": false, "error": "no accessibility or target"]
+        }
+        let dax = AXUIElementCreateApplication(running.processIdentifier)
+        var out: [String] = ["appActive=\(running.isActive)"]
+        var focRef: CFTypeRef?
+        let ferr = AXUIElementCopyAttributeValue(dax, kAXFocusedUIElementAttribute as CFString, &focRef)
+        out.append("focusedElement err=\(ferr.rawValue)")
+        if ferr == .success, let fv = focRef, CFGetTypeID(fv) == AXUIElementGetTypeID() {
+            var el = fv as! AXUIElement
+            var path = ""
+            for hop in 0..<12 {
+                var roleRef: CFTypeRef?; AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleRef)
+                let role = (roleRef as? String) ?? "?"
+                var descRef: CFTypeRef?; AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &descRef)
+                let desc = (descRef as? String) ?? ""
+                out.append("hop\(hop): \(role) '\(desc)'")
+                if role == "AXWindow" {
+                    var tRef: CFTypeRef?; AXUIElementCopyAttributeValue(el, kAXTitleAttribute as CFString, &tRef)
+                    let title = (tRef as? String) ?? ""
+                    let zw = title.unicodeScalars.filter { [0x200b, 0x200c, 0x2060].contains($0.value) }.count
+                    out.append("windowTitle zw=\(zw) decoded=\(decodeTtyMarker(title).map(String.init) ?? "nil") path=\(path)")
+                    break
+                }
+                switch desc {
+                case "Left pane": path = path.isEmpty ? "L" : "L." + path
+                case "Right pane": path = path.isEmpty ? "R" : "R." + path
+                default: break
+                }
+                var parRef: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(el, kAXParentAttribute as CFString, &parRef) == .success,
+                      let pv = parRef, CFGetTypeID(pv) == AXUIElementGetTypeID() else {
+                    out.append("parent dead-end at hop \(hop)")
+                    break
+                }
+                el = pv as! AXUIElement
+            }
+        }
+        return ["ok": true, "debug": out]
+    case "seat-locate":
+        // Find which split currently displays the zero-width marker for the
+        // given tty number (the restoring pane just printed it as a nonce).
+        guard let n = request["tty"] as? Int else {
+            return ["ok": false, "error": "seat-locate needs tty"]
+        }
+        guard AXIsProcessTrusted(),
+              let running = NSRunningApplication.runningApplications(withBundleIdentifier: focusTarget).first else {
+            return ["ok": false, "error": "no accessibility or target"]
+        }
+        let axApp = AXUIElementCreateApplication(running.processIdentifier)
+        var wRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &wRef) == .success,
+              let wins = wRef as? [AXUIElement] else {
+            return ["ok": false, "error": "no windows"]
+        }
+        var found: [String: Any]? = nil
+        for w in wins {
+            guard let f = windowFrame(w) else { continue }
+            walkSplits(w, "") { path, text in
+                guard found == nil else { return }
+                // A freshly restored shell VISIBLY prints its tty in the
+                // login banner ("Last login: ... on ttysNNN") — zero-width
+                // nonces don't survive into AX text, but this does.
+                var search = text[text.startIndex...]
+                while let r = search.range(of: "ttys") {
+                    let digits = search[r.upperBound...].prefix(while: { $0.isNumber })
+                    if let m = Int(digits), m == n {
+                        found = ["ok": true, "x": f.0, "y": f.1, "w": f.2, "h": f.3, "p": pathCode(path)]
+                        return
+                    }
+                    search = search[r.upperBound...]
+                }
+            }
+            if found != nil { break }
+        }
+        return found ?? ["ok": false, "error": "tty not visible in any pane"]
+    case "axtree":
+        // Diagnostic: dump the focus target's AX hierarchy (roles + titles),
+        // to establish what per-split/per-tab structure is actually exposed.
+        guard let running = NSRunningApplication
+                .runningApplications(withBundleIdentifier: focusTarget).first else {
+            return ["ok": false, "error": "focus target not running"]
+        }
+        guard AXIsProcessTrusted() else {
+            return ["ok": false, "error": "accessibility not granted"]
+        }
+        var lines: [String] = []
+        func dump(_ el: AXUIElement, _ depth: Int) {
+            guard depth <= 9, lines.count < 500 else { return }
+            var r: CFTypeRef?; AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &r)
+            var t: CFTypeRef?; AXUIElementCopyAttributeValue(el, kAXTitleAttribute as CFString, &t)
+            var d: CFTypeRef?; AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &d)
+            let role = (r as? String) ?? "?"
+            let title = (t as? String) ?? ""
+            let desc = (d as? String) ?? ""
+            // For text-bearing elements, report how much of the screen text is
+            // readable and a short head sample — the load-bearing question for
+            // nonce-based pane identification.
+            var extra = ""
+            if role == "AXTextArea" || role == "AXStaticText" {
+                var v: CFTypeRef?
+                if AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &v) == .success,
+                   let text = v as? String {
+                    let zw = text.unicodeScalars.filter { [0x200b, 0x200c, 0x2060].contains($0.value) }.count
+                    let marker = decodeTtyMarker(text).map { " marker=\($0)" } ?? ""
+                    extra = " value=\(text.count)ch zw=\(zw)\(marker) '\(String(text.prefix(30)).replacingOccurrences(of: "\n", with: "\\n"))'"
+                } else {
+                    extra = " value=unreadable"
+                }
+            }
+            lines.append(String(repeating: "  ", count: depth) + role
+                         + (title.isEmpty ? "" : " title='\(title)'")
+                         + (desc.isEmpty ? "" : " desc='\(desc)'")
+                         + extra)
+            var c: CFTypeRef?
+            if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &c) == .success,
+               let children = c as? [AXUIElement] {
+                for child in children { dump(child, depth + 1) }
+            }
+        }
+        let ax = AXUIElementCreateApplication(running.processIdentifier)
+        var winsRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute as CFString, &winsRef) == .success,
+           let windows = winsRef as? [AXUIElement] {
+            for (i, w) in windows.enumerated() {
+                lines.append("WINDOW \(i)")
+                dump(w, 1)
+            }
+        }
+        return ["ok": true, "tree": lines]
     default:
         return ["ok": false, "error": "unknown cmd"]
     }
