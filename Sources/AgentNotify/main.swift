@@ -373,7 +373,7 @@ if let data = try? Data(contentsOf: URL(fileURLWithPath: seatingPath)),
     seatingMap = saved.filter { $0.key.contains(":") }
 }
 let seatTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
-seatTimer.schedule(deadline: .now() + 10, repeating: 20)
+seatTimer.schedule(deadline: .now() + 5, repeating: 10)
 seatTimer.setEventHandler { seatSample() }
 seatTimer.resume()
 
